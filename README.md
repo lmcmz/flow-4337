@@ -1,83 +1,97 @@
-# Flow ZKP + ERC-4337 Account Abstraction POC
+# Flow ZKP + ERC-4337 Off-Chain Account Abstraction POC
 
-A proof-of-concept implementation enabling Flow accounts to control ERC-4337 smart contract wallets through Zero-Knowledge Proofs on Flow EVM.
+A privacy-preserving proof-of-concept enabling Flow accounts to control ERC-4337 smart contract wallets through **off-chain Zero-Knowledge Proofs** - no public key exposure, no live blockchain connections needed for verification.
 
 ## 🎯 Project Overview
 
-This project demonstrates how Flow blockchain accounts can control ERC-4337 account abstraction wallets using zero-knowledge proofs, combining Flow's native capabilities with Ethereum's account abstraction standard.
+This project demonstrates how Flow blockchain accounts can **privately** control ERC-4337 account abstraction wallets using Flow's built-in account-proof service combined with off-chain ZKP generation, achieving maximum privacy and efficiency.
 
-### Key Features
+### 🔥 Key Innovations
 
-- **Privacy-Preserving Control**: Flow accounts control EVM wallets without revealing private keys
-- **Cross-Chain Compatibility**: Native Flow accounts managing EVM operations
-- **Gas Abstraction**: ERC-4337 features like gasless transactions and custom paymaster logic
-- **MEV Protection**: Leveraging Flow's multi-role architecture for enhanced security
+- **🔒 Zero Public Key Exposure**: Flow accounts never reveal public keys anywhere
+- **⚡ Off-Chain Proof Generation**: ZKP generated off-chain using Flow's account-proof service
+- **🚫 No Live Connections**: ERC-4337 verification works standalone (no Flow API calls)
+- **🎭 Anonymous Control**: Unlinkable transactions with hidden account identity
+- **🛡️ Maximum Privacy**: Account ownership proven without revealing which account
 
-## 🏗️ Architecture
+## 🏗️ Revolutionary Architecture
 
 ```
-Flow Account (Native) 
-    ↓ generates ZKP
-ZK Circuit (proves ownership)
-    ↓ verifies proof  
-Custom ERC-4337 Account (Flow EVM)
-    ↓ executes operations
-Target Contracts/EOAs
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Flow Account  │    │  Off-Chain ZKP  │    │  ERC-4337 EVM   │
+│   (Private)     │    │   Generator     │    │   (Standalone)  │
+├─────────────────┤    ├─────────────────┤    ├─────────────────┤
+│ 1. Sign Challenge│────│ 2. Flow Verifies│    │ 4. Verify ZKP   │
+│ 2. Account Proof │    │ 3. Generate ZKP │────│ 5. Execute Op   │
+│ 3. Stay Private │    │    (Off-chain)  │    │ 6. No Flow Call │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
+
+### 🎯 Privacy Benefits
+
+| **Traditional Approach** | **Our Off-Chain ZKP Approach** |
+|--------------------------|----------------------------------|
+| ❌ Public keys exposed | ✅ **Zero public key exposure** |
+| ❌ Account identity visible | ✅ **Anonymous account control** |
+| ❌ Live blockchain calls | ✅ **Standalone verification** |
+| ❌ Transaction linkability | ✅ **Unlinkable operations** |
+| ❌ Metadata leakage | ✅ **Zero metadata exposure** |
 
 ## 📋 Implementation Steps
 
-### Phase 1: ZKP Circuit Development
-- [ ] **Step 1.1**: Design circuit schema for Flow account signature verification
-- [ ] **Step 1.2**: Implement Poseidon hash circuit for Flow compatibility
-- [ ] **Step 1.3**: Create proof generation logic for message signing
-- [ ] **Step 1.4**: Generate trusted setup parameters
-- [ ] **Step 1.5**: Test circuit with sample Flow account signatures
+### Phase 1: Off-Chain Proof System
+- [ ] **Step 1.1**: Integrate Flow account-proof service with FCL
+- [ ] **Step 1.2**: Design commitment-based ZKP circuit (no public key exposure)
+- [ ] **Step 1.3**: Implement off-chain proof generation service
+- [ ] **Step 1.4**: Create challenge-response system for account verification
+- [ ] **Step 1.5**: Build nullifier system for replay protection
 
-### Phase 2: Smart Contract Implementation
-- [ ] **Step 2.1**: Deploy ZKP verifier contract on Flow EVM
-- [ ] **Step 2.2**: Implement custom ERC-4337 account with ZKP validation
-- [ ] **Step 2.3**: Create paymaster contract for gas abstraction (optional)
-- [ ] **Step 2.4**: Integrate with standard ERC-4337 EntryPoint
-- [ ] **Step 2.5**: Add emergency recovery mechanisms
+### Phase 2: Privacy-Preserving Smart Contracts
+- [ ] **Step 2.1**: Deploy standalone ZKP verifier (no Flow connection needed)
+- [ ] **Step 2.2**: Implement commitment registry for authorized accounts
+- [ ] **Step 2.3**: Create ERC-4337 account with off-chain proof validation
+- [ ] **Step 2.4**: Add nullifier tracking for anti-replay protection
+- [ ] **Step 2.5**: Implement emergency recovery with privacy preservation
 
-### Phase 3: SDK & Integration Layer
-- [ ] **Step 3.1**: Build Flow account signature generation SDK
-- [ ] **Step 3.2**: Create UserOperation builder with ZKP payload
-- [ ] **Step 3.3**: Implement proof generation and verification pipeline
-- [ ] **Step 3.4**: Add batch operation support
-- [ ] **Step 3.5**: Create frontend demo application
+### Phase 3: Off-Chain Infrastructure
+- [ ] **Step 3.1**: Build Flow account-proof integration SDK
+- [ ] **Step 3.2**: Create off-chain ZKP generation service
+- [ ] **Step 3.3**: Implement proof verification and caching system
+- [ ] **Step 3.4**: Add batch proof generation support
+- [ ] **Step 3.5**: Create privacy-preserving frontend demo
 
-### Phase 4: Testing & Validation
-- [ ] **Step 4.1**: Unit tests for ZKP circuits
-- [ ] **Step 4.2**: Smart contract integration tests
-- [ ] **Step 4.3**: End-to-end flow testing
-- [ ] **Step 4.4**: Gas optimization and benchmarking
-- [ ] **Step 4.5**: Security audit and vulnerability assessment
+### Phase 4: Privacy & Security Validation
+- [ ] **Step 4.1**: Test zero public key exposure guarantees
+- [ ] **Step 4.2**: Validate standalone ERC-4337 verification
+- [ ] **Step 4.3**: End-to-end privacy preservation testing
+- [ ] **Step 4.4**: Gas optimization for off-chain proof verification
+- [ ] **Step 4.5**: Security audit focusing on privacy guarantees
 
 ## 🛠️ Technical Stack
 
-### ZKP Implementation
-- **Circuit Language**: Circom
-- **Proof System**: Groth16 (via snarkjs)
-- **Hash Function**: Poseidon (Flow-compatible)
-- **Curve**: BN254
+### Off-Chain ZKP System
+- **Circuit Language**: Circom (commitment-based, no public key exposure)
+- **Proof System**: Groth16 (via snarkjs) - compact proofs
+- **Hash Function**: Poseidon (privacy-optimized)
+- **Commitment Scheme**: Pedersen commitments for account hiding
 
-### Smart Contracts
+### Privacy-Preserving Smart Contracts
 - **Language**: Solidity ^0.8.19
-- **Framework**: Hardhat/Foundry
+- **Framework**: Hardhat with ZKP extensions
 - **Standards**: ERC-4337, EIP-1967 (Proxy)
-- **Libraries**: OpenZeppelin, Account Abstraction SDK
+- **Libraries**: OpenZeppelin, Custom ZKP verifiers
 
-### Flow Integration
-- **SDK**: Flow JavaScript SDK
-- **Cryptography**: ECDSA P-256 (Flow native)
-- **Network**: Flow Testnet → Flow Mainnet
+### Flow Account-Proof Integration
+- **SDK**: Flow Client Library (FCL) with account-proof service
+- **Verification**: Off-chain Flow signature validation
+- **Privacy**: Zero public key exposure protocol
+- **Network**: Flow Testnet → Flow Mainnet (for account-proof only)
 
-### Development Tools
+### Off-Chain Infrastructure
 - **Environment**: Node.js, TypeScript
-- **Testing**: Jest, Hardhat Test Suite
-- **Deployment**: Hardhat Deploy, Flow CLI
+- **Proof Generation**: Off-chain ZKP service
+- **Caching**: Redis for proof optimization
+- **API**: RESTful proof generation endpoints
 
 ## 🚀 Quick Start
 
@@ -116,20 +130,23 @@ npm test
 
 ```
 flow-zkp/
-├── circuits/                 # ZKP circuits
-│   ├── flow-signature.circom # Main circuit
-│   └── poseidon.circom      # Hash function
-├── contracts/               # Solidity contracts
-│   ├── FlowZKAccount.sol   # ERC-4337 account with ZKP
-│   ├── ZKVerifier.sol      # Generated verifier
-│   └── FlowPaymaster.sol   # Custom paymaster
-├── src/                    # SDK and utilities
-│   ├── flow-integration.ts # Flow account operations
-│   ├── zkp-generator.ts   # Proof generation
-│   └── account-factory.ts # Account creation
-├── test/                  # Test suites
-├── scripts/              # Deployment scripts
-└── frontend/            # Demo application
+├── circuits/                       # Privacy-preserving ZKP circuits
+│   ├── flow-ownership.circom      # Off-chain ownership proof (no pubkey)
+│   ├── commitment.circom          # Account commitment generation
+│   └── nullifier.circom           # Replay protection system
+├── contracts/                     # Standalone smart contracts
+│   ├── FlowZKAccountOffChain.sol  # ERC-4337 with off-chain verification
+│   ├── CommitmentRegistry.sol     # Authorized account commitments
+│   ├── ZKVerifierOffChain.sol     # Standalone ZKP verifier
+│   └── NullifierTracker.sol       # Anti-replay protection
+├── src/                          # Off-chain infrastructure
+│   ├── flow-account-proof.ts     # FCL account-proof integration
+│   ├── off-chain-zkp.ts          # Off-chain proof generation
+│   ├── commitment-manager.ts     # Account commitment system
+│   └── proof-service.ts          # RESTful proof generation API
+├── test/                         # Privacy-focused test suites
+├── scripts/                      # Deployment and demo scripts
+└── frontend/                     # Privacy-preserving demo app
 ```
 
 ## 🔧 Configuration
