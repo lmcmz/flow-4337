@@ -14,6 +14,47 @@ fcl.config({
   "0xProfile": "0xba1132bc08f82fe2"
 });
 
+/**
+ * Official Flow EVM Account Proof Structures
+ * Based on: https://github.com/onflow/flow-go/blob/d956a5cf7ea10e9c6b5bd735653d2b1a74e15287/fvm/evm/types/proof.go#L131-L144
+ */
+
+export interface KeyIndices {
+  indices: number[];
+}
+
+export interface FlowAddress {
+  hex: string;
+}
+
+export interface PublicPath {
+  domain: string;
+  identifier: string;
+}
+
+export interface Signatures {
+  signatures: string[];
+}
+
+export interface SignedData {
+  data: string;
+  hash: string;
+}
+
+export interface COAOwnershipProof {
+  keyIndices: KeyIndices;
+  address: FlowAddress;
+  capabilityPath: PublicPath;
+  signatures: Signatures;
+}
+
+export interface COAOwnershipProofInContext {
+  coaOwnershipProof: COAOwnershipProof;
+  signedData: SignedData;
+  evmAddress: string; // EVM address (0x...)
+}
+
+// Legacy interface for backward compatibility
 export interface FlowAccountProofData {
   address: string;
   keyId: number;
@@ -22,6 +63,14 @@ export interface FlowAccountProofData {
   timestamp: number;
 }
 
+export interface FlowEVMProofResponse {
+  coaOwnershipProof: COAOwnershipProofInContext;
+  verificationResult: boolean;
+  commitment: string;
+  nullifierSecret: string;
+}
+
+// Legacy interface for backward compatibility
 export interface FlowAccountProofResponse {
   accountProofData: FlowAccountProofData;
   verificationResult: boolean;
@@ -63,7 +112,69 @@ export class FlowAccountProofService {
   }
 
   /**
-   * Request Flow account proof from user's wallet
+   * Request Flow EVM COA ownership proof from user's wallet
+   * @param challenge Challenge string
+   * @param evmAddress EVM address to prove ownership of
+   * @returns COA ownership proof or null if failed
+   */
+  async requestCOAOwnershipProof(
+    challenge: string, 
+    evmAddress: string
+  ): Promise<COAOwnershipProofInContext | null> {
+    try {
+      // Verify challenge is valid and not expired
+      const challengeData = this.activeChallenges.get(challenge);
+      if (!challengeData || Date.now() > challengeData.expires) {
+        throw new Error('Invalid or expired challenge');
+      }
+
+      // Create signed data for COA ownership proof
+      const signedData: SignedData = {
+        data: this.createCOAProofMessage(challenge, evmAddress, challengeData.timestamp),
+        hash: require('crypto').createHash('sha256')
+          .update(this.createCOAProofMessage(challenge, evmAddress, challengeData.timestamp))
+          .digest('hex')
+      };
+
+      // Request signature from Flow wallet using FCL
+      const signatureResponse = await fcl.currentUser.signUserMessage(signedData.data);
+      
+      if (!signatureResponse || signatureResponse.length === 0) {
+        return null;
+      }
+
+      // Create COA ownership proof using official structure
+      const coaOwnershipProof: COAOwnershipProof = {
+        keyIndices: {
+          indices: signatureResponse.map(sig => sig.keyId)
+        },
+        address: {
+          hex: signatureResponse[0].addr
+        },
+        capabilityPath: {
+          domain: "public",
+          identifier: "flowTokenReceiver" // Default capability path
+        },
+        signatures: {
+          signatures: signatureResponse.map(sig => sig.signature)
+        }
+      };
+
+      const proofInContext: COAOwnershipProofInContext = {
+        coaOwnershipProof,
+        signedData,
+        evmAddress
+      };
+
+      return proofInContext;
+    } catch (error) {
+      console.error('Failed to request COA ownership proof:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Request Flow account proof from user's wallet (legacy method)
    * @param challenge Challenge string
    * @returns Account proof data or null if failed
    */
@@ -102,7 +213,90 @@ export class FlowAccountProofService {
   }
 
   /**
-   * Verify Flow account proof using FCL
+   * Verify Flow EVM COA ownership proof
+   * @param coaProof COA ownership proof to verify
+   * @param challenge Original challenge
+   * @returns Verification result with commitment data
+   */
+  async verifyCOAOwnershipProof(
+    coaProof: COAOwnershipProofInContext,
+    challenge: string
+  ): Promise<FlowEVMProofResponse> {
+    try {
+      // Verify challenge exists and is valid
+      const challengeData = this.activeChallenges.get(challenge);
+      if (!challengeData) {
+        throw new Error('Invalid challenge');
+      }
+
+      // Verify the signed data matches our expected format
+      const expectedMessage = this.createCOAProofMessage(
+        challenge, 
+        coaProof.evmAddress, 
+        challengeData.timestamp
+      );
+      
+      if (coaProof.signedData.data !== expectedMessage) {
+        throw new Error('Signed data does not match expected format');
+      }
+
+      // Verify signature hash
+      const expectedHash = require('crypto').createHash('sha256')
+        .update(coaProof.signedData.data)
+        .digest('hex');
+      
+      if (coaProof.signedData.hash !== expectedHash) {
+        throw new Error('Signed data hash verification failed');
+      }
+
+      // Verify signatures using FCL
+      const verificationData = {
+        address: coaProof.coaOwnershipProof.address.hex,
+        message: coaProof.signedData.data,
+        signatures: coaProof.coaOwnershipProof.signatures.signatures,
+        keyIndices: coaProof.coaOwnershipProof.keyIndices.indices
+      };
+
+      const isValid = await this.verifyFlowEVMSignatures(verificationData);
+      
+      if (!isValid) {
+        return {
+          coaOwnershipProof: coaProof,
+          verificationResult: false,
+          commitment: '',
+          nullifierSecret: ''
+        };
+      }
+
+      // Generate commitment and nullifier secret for privacy
+      const { commitment, nullifierSecret } = this.generateCOACommitmentData(
+        coaProof,
+        challenge
+      );
+
+      // Clean up used challenge
+      this.activeChallenges.delete(challenge);
+
+      return {
+        coaOwnershipProof: coaProof,
+        verificationResult: true,
+        commitment,
+        nullifierSecret
+      };
+
+    } catch (error) {
+      console.error('COA ownership proof verification failed:', error);
+      return {
+        coaOwnershipProof: coaProof,
+        verificationResult: false,
+        commitment: '',
+        nullifierSecret: ''
+      };
+    }
+  }
+
+  /**
+   * Verify Flow account proof using FCL (legacy method)
    * @param accountProofData Account proof data to verify
    * @param challenge Original challenge
    * @returns Verification result with commitment data
@@ -198,7 +392,18 @@ export class FlowAccountProofService {
   }
 
   /**
-   * Create message for Flow account proof signing
+   * Create message for Flow COA ownership proof signing
+   * @param challenge Challenge string
+   * @param evmAddress EVM address to prove ownership of
+   * @param timestamp Challenge timestamp
+   * @returns Message to be signed
+   */
+  private createCOAProofMessage(challenge: string, evmAddress: string, timestamp: number): string {
+    return `Flow EVM COA Ownership Proof\nChallenge: ${challenge}\nEVM Address: ${evmAddress}\nTimestamp: ${timestamp}\nThis proves that your Flow account controls the specified EVM address.\nDo not sign this message unless you trust the requesting application.`;
+  }
+
+  /**
+   * Create message for Flow account proof signing (legacy)
    * @param challenge Challenge string
    * @param timestamp Challenge timestamp
    * @returns Message to be signed
@@ -208,7 +413,69 @@ export class FlowAccountProofService {
   }
 
   /**
-   * Verify signature with Flow blockchain using FCL
+   * Generate commitment data for COA ownership proof (privacy-preserving)
+   * @param coaProof COA ownership proof
+   * @param challenge Original challenge
+   * @returns Commitment and nullifier secret
+   */
+  private generateCOACommitmentData(
+    coaProof: COAOwnershipProofInContext,
+    challenge: string
+  ): { commitment: string; nullifierSecret: string } {
+    // Generate random salt for commitment
+    const salt = require('crypto').randomBytes(32);
+    
+    // Generate nullifier secret
+    const nullifierSecret = require('crypto').randomBytes(32).toString('hex');
+    
+    // Create commitment: Hash(COA proof data, salt)
+    // This hides the COA ownership details while proving ownership
+    const commitmentHash = require('crypto').createHash('sha256');
+    commitmentHash.update(coaProof.coaOwnershipProof.address.hex);
+    commitmentHash.update(coaProof.evmAddress);
+    commitmentHash.update(JSON.stringify(coaProof.coaOwnershipProof.keyIndices));
+    commitmentHash.update(coaProof.signedData.hash);
+    commitmentHash.update(salt);
+    
+    const commitment = commitmentHash.digest('hex');
+    
+    return { commitment, nullifierSecret };
+  }
+
+  /**
+   * Verify Flow EVM signatures using FCL
+   * @param verificationData Data to verify
+   * @returns True if signatures are valid
+   */
+  private async verifyFlowEVMSignatures(verificationData: {
+    address: string;
+    message: string;
+    signatures: string[];
+    keyIndices: number[];
+  }): Promise<boolean> {
+    try {
+      // Prepare signature verification data for FCL
+      const signatureData = verificationData.signatures.map((signature, index) => ({
+        addr: verificationData.address,
+        keyId: verificationData.keyIndices[index],
+        signature: signature
+      }));
+
+      // Use FCL's multi-signature verification
+      const isValid = await fcl.verifyUserSignatures(
+        verificationData.message,
+        signatureData
+      );
+      
+      return isValid;
+    } catch (error) {
+      console.error('Flow EVM signature verification failed:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Verify signature with Flow blockchain using FCL (legacy method)
    * @param verificationData Data to verify
    * @returns True if signature is valid
    */
@@ -286,7 +553,48 @@ export class FlowAccountProofService {
   }
 
   /**
-   * Convert account proof data to circuit inputs (without exposing sensitive data)
+   * Convert COA ownership proof to circuit inputs (privacy-preserving)
+   * @param coaProof Verified COA ownership proof
+   * @param challenge Original challenge
+   * @returns Circuit inputs for ZKP generation
+   */
+  convertCOAProofToCircuitInputs(
+    coaProof: COAOwnershipProofInContext,
+    challenge: string
+  ): {
+    accountProofData: [string, string, string, string];
+    challengeHash: string;
+  } {
+    // Convert COA proof components to circuit-compatible format
+    // Hash components to hide actual values while preserving proof capability
+    const hash1 = require('crypto').createHash('sha256')
+      .update(coaProof.coaOwnershipProof.address.hex)
+      .digest('hex');
+    
+    const hash2 = require('crypto').createHash('sha256')
+      .update(JSON.stringify(coaProof.coaOwnershipProof.keyIndices))
+      .digest('hex');
+    
+    const hash3 = require('crypto').createHash('sha256')
+      .update(JSON.stringify(coaProof.coaOwnershipProof.signatures))
+      .digest('hex');
+    
+    const hash4 = require('crypto').createHash('sha256')
+      .update(coaProof.signedData.hash)
+      .digest('hex');
+    
+    const challengeHash = require('crypto').createHash('sha256')
+      .update(challenge)
+      .digest('hex');
+    
+    return {
+      accountProofData: [hash1, hash2, hash3, hash4],
+      challengeHash
+    };
+  }
+
+  /**
+   * Convert account proof data to circuit inputs (legacy method)
    * @param accountProofData Verified account proof
    * @param challenge Original challenge
    * @returns Circuit inputs for ZKP generation

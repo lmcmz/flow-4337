@@ -1,7 +1,11 @@
 import * as snarkjs from "snarkjs";
 import { createHash, randomBytes } from "crypto";
 import * as fs from "fs";
-import { FlowAccountProofData, flowAccountProofService } from "./flow-account-proof";
+import { 
+  FlowAccountProofData, 
+  COAOwnershipProofInContext,
+  flowAccountProofService 
+} from "./flow-account-proof";
 
 /**
  * Off-Chain Zero-Knowledge Proof Generator
@@ -39,10 +43,18 @@ export interface OffChainZKProof {
 }
 
 export interface ProofGenerationRequest {
-  flowAccountProof: FlowAccountProofData;
+  flowAccountProof?: FlowAccountProofData;  // Legacy support
+  coaOwnershipProof?: COAOwnershipProofInContext;  // Official Flow EVM proof
   challenge: string;
   messageHash: string;
   erc4337Operation?: any;  // Optional ERC-4337 operation data
+}
+
+export interface COAProofGenerationRequest {
+  coaOwnershipProof: COAOwnershipProofInContext;
+  challenge: string;
+  messageHash: string;
+  erc4337Operation?: any;
 }
 
 export class OffChainZKPGenerator {
@@ -61,7 +73,52 @@ export class OffChainZKPGenerator {
   }
 
   /**
-   * Generate off-chain ZKP for Flow account ownership
+   * Generate off-chain ZKP for Flow COA ownership (using official Flow EVM proof structure)
+   * @param request COA proof generation request
+   * @returns Zero-knowledge proof
+   */
+  async generateCOAOwnershipProof(request: COAProofGenerationRequest): Promise<OffChainZKProof> {
+    try {
+      // 1. Verify Flow COA ownership proof using FCL
+      const verificationResult = await flowAccountProofService.verifyCOAOwnershipProof(
+        request.coaOwnershipProof,
+        request.challenge
+      );
+
+      if (!verificationResult.verificationResult) {
+        throw new Error('Flow COA ownership proof verification failed');
+      }
+
+      // 2. Generate circuit inputs without exposing sensitive data
+      const circuitInputs = this.prepareCOACircuitInputs(
+        request.coaOwnershipProof,
+        request.challenge,
+        request.messageHash,
+        verificationResult.commitment,
+        verificationResult.nullifierSecret
+      );
+
+      // 3. Generate ZK proof off-chain
+      let zkProof: OffChainZKProof;
+      
+      if (this.circuitFilesExist()) {
+        // Use real circuit if available
+        zkProof = await this.generateRealProof(circuitInputs);
+      } else {
+        // Use mock proof for development/testing
+        zkProof = this.generateMockProof(circuitInputs);
+      }
+
+      return zkProof;
+
+    } catch (error) {
+      console.error('Off-chain COA proof generation failed:', error);
+      throw new Error(`COA proof generation failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Generate off-chain ZKP for Flow account ownership (legacy method)
    * @param request Proof generation request
    * @returns Zero-knowledge proof
    */
@@ -106,7 +163,57 @@ export class OffChainZKPGenerator {
   }
 
   /**
-   * Prepare circuit inputs from Flow account proof (privacy-preserving)
+   * Prepare circuit inputs from Flow COA ownership proof (privacy-preserving)
+   * @param coaProof COA ownership proof
+   * @param challenge Original challenge
+   * @param messageHash ERC-4337 message hash
+   * @param commitment Account commitment
+   * @param nullifierSecret Nullifier secret
+   * @returns Circuit inputs
+   */
+  private prepareCOACircuitInputs(
+    coaProof: COAOwnershipProofInContext,
+    challenge: string,
+    messageHash: string,
+    commitment: string,
+    nullifierSecret: string
+  ): OffChainZKPInputs {
+    // Convert COA proof to hashed components (privacy-preserving)
+    const circuitData = flowAccountProofService.convertCOAProofToCircuitInputs(
+      coaProof,
+      challenge
+    );
+
+    // Generate random salt for commitment
+    const salt = randomBytes(32).toString('hex');
+
+    // Generate nullifier
+    const nullifier = this.generateNullifier(
+      circuitData.accountProofData[0], // Account identifier
+      nullifierSecret,
+      circuitData.challengeHash
+    );
+
+    // Current timestamp
+    const timestamp = Date.now().toString();
+
+    return {
+      // Private inputs (witness)
+      accountProofData: circuitData.accountProofData,
+      salt,
+      nullifierSecret,
+      
+      // Public inputs
+      commitment,
+      nullifier,
+      messageHash,
+      challengeHash: circuitData.challengeHash,
+      timestamp
+    };
+  }
+
+  /**
+   * Prepare circuit inputs from Flow account proof (legacy - privacy-preserving)
    * @param accountProofData Flow account proof
    * @param challenge Original challenge
    * @param messageHash ERC-4337 message hash
