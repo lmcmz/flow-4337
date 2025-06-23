@@ -11,7 +11,7 @@ import { createHash, randomBytes } from "crypto";
 fcl.config({
   "accessNode.api": "https://rest-testnet.onflow.org",
   "discovery.wallet": "https://fcl-discovery.onflow.org/testnet/authn",
-  "0xProfile": "0xba1132bc08f82fe2"
+  "0xProfile": "0xba1132bc08f82fe2",
 });
 
 /**
@@ -93,21 +93,21 @@ export class FlowAccountProofService {
    * @returns Challenge data
    */
   generateChallenge(): ChallengeData {
-    const challenge = randomBytes(32).toString('hex');
+    const challenge = randomBytes(32).toString("hex");
     const timestamp = Date.now();
     const expires = timestamp + this.CHALLENGE_EXPIRY;
-    
+
     const challengeData: ChallengeData = {
       challenge,
       timestamp,
-      expires
+      expires,
     };
-    
+
     this.activeChallenges.set(challenge, challengeData);
-    
+
     // Clean up expired challenges
     this.cleanupExpiredChallenges();
-    
+
     return challengeData;
   }
 
@@ -118,27 +118,40 @@ export class FlowAccountProofService {
    * @returns COA ownership proof or null if failed
    */
   async requestCOAOwnershipProof(
-    challenge: string, 
+    challenge: string,
     evmAddress: string
   ): Promise<COAOwnershipProofInContext | null> {
     try {
       // Verify challenge is valid and not expired
       const challengeData = this.activeChallenges.get(challenge);
       if (!challengeData || Date.now() > challengeData.expires) {
-        throw new Error('Invalid or expired challenge');
+        throw new Error("Invalid or expired challenge");
       }
 
       // Create signed data for COA ownership proof
       const signedData: SignedData = {
-        data: this.createCOAProofMessage(challenge, evmAddress, challengeData.timestamp),
-        hash: require('crypto').createHash('sha256')
-          .update(this.createCOAProofMessage(challenge, evmAddress, challengeData.timestamp))
-          .digest('hex')
+        data: this.createCOAProofMessage(
+          challenge,
+          evmAddress,
+          challengeData.timestamp
+        ),
+        hash: require("crypto")
+          .createHash("sha256")
+          .update(
+            this.createCOAProofMessage(
+              challenge,
+              evmAddress,
+              challengeData.timestamp
+            )
+          )
+          .digest("hex"),
       };
 
       // Request signature from Flow wallet using FCL
-      const signatureResponse = await fcl.currentUser.signUserMessage(signedData.data);
-      
+      const signatureResponse = await fcl.currentUser.signUserMessage(
+        signedData.data
+      );
+
       if (!signatureResponse || signatureResponse.length === 0) {
         return null;
       }
@@ -146,29 +159,29 @@ export class FlowAccountProofService {
       // Create COA ownership proof using official structure
       const coaOwnershipProof: COAOwnershipProof = {
         keyIndices: {
-          indices: signatureResponse.map(sig => sig.keyId)
+          indices: signatureResponse.map((sig) => sig.keyId),
         },
         address: {
-          hex: signatureResponse[0].addr
+          hex: signatureResponse[0].addr,
         },
         capabilityPath: {
           domain: "public",
-          identifier: "flowTokenReceiver" // Default capability path
+          identifier: "flowTokenReceiver", // Default capability path
         },
         signatures: {
-          signatures: signatureResponse.map(sig => sig.signature)
-        }
+          signatures: signatureResponse.map((sig) => sig.signature),
+        },
       };
 
       const proofInContext: COAOwnershipProofInContext = {
         coaOwnershipProof,
         signedData,
-        evmAddress
+        evmAddress,
       };
 
       return proofInContext;
     } catch (error) {
-      console.error('Failed to request COA ownership proof:', error);
+      console.error("Failed to request COA ownership proof:", error);
       return null;
     }
   }
@@ -178,20 +191,25 @@ export class FlowAccountProofService {
    * @param challenge Challenge string
    * @returns Account proof data or null if failed
    */
-  async requestAccountProof(challenge: string): Promise<FlowAccountProofData | null> {
+  async requestAccountProof(
+    challenge: string
+  ): Promise<FlowAccountProofData | null> {
     try {
       // Verify challenge is valid and not expired
       const challengeData = this.activeChallenges.get(challenge);
       if (!challengeData || Date.now() > challengeData.expires) {
-        throw new Error('Invalid or expired challenge');
+        throw new Error("Invalid or expired challenge");
       }
 
       // Create message for signing
-      const message = this.createProofMessage(challenge, challengeData.timestamp);
-      
+      const message = this.createProofMessage(
+        challenge,
+        challengeData.timestamp
+      );
+
       // Request signature from Flow wallet using FCL
       const signatureResponse = await fcl.currentUser.signUserMessage(message);
-      
+
       if (!signatureResponse || signatureResponse.length === 0) {
         return null;
       }
@@ -202,12 +220,12 @@ export class FlowAccountProofService {
         keyId: signatureResponse[0].keyId,
         signature: signatureResponse[0].signature,
         nonce: challenge,
-        timestamp: challengeData.timestamp
+        timestamp: challengeData.timestamp,
       };
 
       return accountProofData;
     } catch (error) {
-      console.error('Failed to request account proof:', error);
+      console.error("Failed to request account proof:", error);
       return null;
     }
   }
@@ -226,27 +244,28 @@ export class FlowAccountProofService {
       // Verify challenge exists and is valid
       const challengeData = this.activeChallenges.get(challenge);
       if (!challengeData) {
-        throw new Error('Invalid challenge');
+        throw new Error("Invalid challenge");
       }
 
       // Verify the signed data matches our expected format
       const expectedMessage = this.createCOAProofMessage(
-        challenge, 
-        coaProof.evmAddress, 
+        challenge,
+        coaProof.evmAddress,
         challengeData.timestamp
       );
-      
+
       if (coaProof.signedData.data !== expectedMessage) {
-        throw new Error('Signed data does not match expected format');
+        throw new Error("Signed data does not match expected format");
       }
 
       // Verify signature hash
-      const expectedHash = require('crypto').createHash('sha256')
+      const expectedHash = require("crypto")
+        .createHash("sha256")
         .update(coaProof.signedData.data)
-        .digest('hex');
-      
+        .digest("hex");
+
       if (coaProof.signedData.hash !== expectedHash) {
-        throw new Error('Signed data hash verification failed');
+        throw new Error("Signed data hash verification failed");
       }
 
       // Verify signatures using FCL
@@ -254,17 +273,17 @@ export class FlowAccountProofService {
         address: coaProof.coaOwnershipProof.address.hex,
         message: coaProof.signedData.data,
         signatures: coaProof.coaOwnershipProof.signatures.signatures,
-        keyIndices: coaProof.coaOwnershipProof.keyIndices.indices
+        keyIndices: coaProof.coaOwnershipProof.keyIndices.indices,
       };
 
       const isValid = await this.verifyFlowEVMSignatures(verificationData);
-      
+
       if (!isValid) {
         return {
           coaOwnershipProof: coaProof,
           verificationResult: false,
-          commitment: '',
-          nullifierSecret: ''
+          commitment: "",
+          nullifierSecret: "",
         };
       }
 
@@ -281,16 +300,15 @@ export class FlowAccountProofService {
         coaOwnershipProof: coaProof,
         verificationResult: true,
         commitment,
-        nullifierSecret
+        nullifierSecret,
       };
-
     } catch (error) {
-      console.error('COA ownership proof verification failed:', error);
+      console.error("COA ownership proof verification failed:", error);
       return {
         coaOwnershipProof: coaProof,
         verificationResult: false,
-        commitment: '',
-        nullifierSecret: ''
+        commitment: "",
+        nullifierSecret: "",
       };
     }
   }
@@ -302,36 +320,39 @@ export class FlowAccountProofService {
    * @returns Verification result with commitment data
    */
   async verifyAccountProof(
-    accountProofData: FlowAccountProofData, 
+    accountProofData: FlowAccountProofData,
     challenge: string
   ): Promise<FlowAccountProofResponse> {
     try {
       // Verify challenge exists and is valid
       const challengeData = this.activeChallenges.get(challenge);
       if (!challengeData) {
-        throw new Error('Invalid challenge');
+        throw new Error("Invalid challenge");
       }
 
       // Recreate the original message
-      const message = this.createProofMessage(challenge, challengeData.timestamp);
-      
+      const message = this.createProofMessage(
+        challenge,
+        challengeData.timestamp
+      );
+
       // Verify signature using FCL account proof verification
       const verificationData = {
         address: accountProofData.address,
         signature: accountProofData.signature,
         keyId: accountProofData.keyId,
-        message: message
+        message: message,
       };
 
       // Use FCL's built-in verification (this connects to Flow blockchain)
       const isValid = await this.verifySignatureWithFlow(verificationData);
-      
+
       if (!isValid) {
         return {
           accountProofData,
           verificationResult: false,
-          commitment: '',
-          nullifierSecret: ''
+          commitment: "",
+          nullifierSecret: "",
         };
       }
 
@@ -348,16 +369,15 @@ export class FlowAccountProofService {
         accountProofData,
         verificationResult: true,
         commitment,
-        nullifierSecret
+        nullifierSecret,
       };
-
     } catch (error) {
-      console.error('Account proof verification failed:', error);
+      console.error("Account proof verification failed:", error);
       return {
         accountProofData,
         verificationResult: false,
-        commitment: '',
-        nullifierSecret: ''
+        commitment: "",
+        nullifierSecret: "",
       };
     }
   }
@@ -374,20 +394,20 @@ export class FlowAccountProofService {
   ): { commitment: string; nullifierSecret: string } {
     // Generate random salt for commitment
     const salt = randomBytes(32);
-    
+
     // Generate nullifier secret
-    const nullifierSecret = randomBytes(32).toString('hex');
-    
+    const nullifierSecret = randomBytes(32).toString("hex");
+
     // Create commitment: Hash(accountData, salt)
     // This hides the account identity while proving ownership
-    const commitmentHash = createHash('sha256');
+    const commitmentHash = createHash("sha256");
     commitmentHash.update(accountProofData.address);
     commitmentHash.update(accountProofData.signature);
     commitmentHash.update(accountProofData.keyId.toString());
     commitmentHash.update(salt);
-    
-    const commitment = commitmentHash.digest('hex');
-    
+
+    const commitment = commitmentHash.digest("hex");
+
     return { commitment, nullifierSecret };
   }
 
@@ -398,7 +418,11 @@ export class FlowAccountProofService {
    * @param timestamp Challenge timestamp
    * @returns Message to be signed
    */
-  private createCOAProofMessage(challenge: string, evmAddress: string, timestamp: number): string {
+  private createCOAProofMessage(
+    challenge: string,
+    evmAddress: string,
+    timestamp: number
+  ): string {
     return `Flow EVM COA Ownership Proof\nChallenge: ${challenge}\nEVM Address: ${evmAddress}\nTimestamp: ${timestamp}\nThis proves that your Flow account controls the specified EVM address.\nDo not sign this message unless you trust the requesting application.`;
   }
 
@@ -423,22 +447,24 @@ export class FlowAccountProofService {
     challenge: string
   ): { commitment: string; nullifierSecret: string } {
     // Generate random salt for commitment
-    const salt = require('crypto').randomBytes(32);
-    
+    const salt = require("crypto").randomBytes(32);
+
     // Generate nullifier secret
-    const nullifierSecret = require('crypto').randomBytes(32).toString('hex');
-    
+    const nullifierSecret = require("crypto").randomBytes(32).toString("hex");
+
     // Create commitment: Hash(COA proof data, salt)
     // This hides the COA ownership details while proving ownership
-    const commitmentHash = require('crypto').createHash('sha256');
+    const commitmentHash = require("crypto").createHash("sha256");
     commitmentHash.update(coaProof.coaOwnershipProof.address.hex);
     commitmentHash.update(coaProof.evmAddress);
-    commitmentHash.update(JSON.stringify(coaProof.coaOwnershipProof.keyIndices));
+    commitmentHash.update(
+      JSON.stringify(coaProof.coaOwnershipProof.keyIndices)
+    );
     commitmentHash.update(coaProof.signedData.hash);
     commitmentHash.update(salt);
-    
-    const commitment = commitmentHash.digest('hex');
-    
+
+    const commitment = commitmentHash.digest("hex");
+
     return { commitment, nullifierSecret };
   }
 
@@ -455,21 +481,27 @@ export class FlowAccountProofService {
   }): Promise<boolean> {
     try {
       // Prepare signature verification data for FCL
-      const signatureData = verificationData.signatures.map((signature, index) => ({
-        addr: verificationData.address,
-        keyId: verificationData.keyIndices[index],
-        signature: signature
-      }));
+      const signatureData = verificationData.signatures.map(
+        (signature, index) => ({
+          addr: verificationData.address,
+          keyId: verificationData.keyIndices[index],
+          signature: signature,
+        })
+      );
 
       // Use FCL's multi-signature verification
-      const isValid = await fcl.verifyUserSignatures(
+      const verifyFunction = fcl.verifyUserSignatures as unknown as (
+        message: string,
+        signatures: any[]
+      ) => Promise<boolean>;
+      const isValid = await verifyFunction(
         verificationData.message,
         signatureData
       );
-      
+
       return isValid;
     } catch (error) {
-      console.error('Flow EVM signature verification failed:', error);
+      console.error("Flow EVM signature verification failed:", error);
       return false;
     }
   }
@@ -488,18 +520,21 @@ export class FlowAccountProofService {
     try {
       // Use FCL's signature verification
       // This makes a call to Flow blockchain to verify the signature
-      const isValid = await fcl.verifyUserSignatures(
-        verificationData.message,
-        [{
+      const verifyFunction = fcl.verifyUserSignatures as unknown as (
+        message: string,
+        signatures: any[]
+      ) => Promise<boolean>;
+      const isValid = await verifyFunction(verificationData.message, [
+        {
           addr: verificationData.address,
           keyId: verificationData.keyId,
-          signature: verificationData.signature
-        }]
-      );
-      
+          signature: verificationData.signature,
+        },
+      ]);
+
       return isValid;
     } catch (error) {
-      console.error('Flow signature verification failed:', error);
+      console.error("Flow signature verification failed:", error);
       return false;
     }
   }
@@ -523,9 +558,15 @@ export class FlowAccountProofService {
   async getCurrentUser(): Promise<{ addr: string; loggedIn: boolean } | null> {
     try {
       const user = await fcl.currentUser.snapshot();
-      return user;
+      if (user && user.addr) {
+        return {
+          addr: user.addr,
+          loggedIn: user.loggedIn || false,
+        };
+      }
+      return null;
     } catch (error) {
-      console.error('Failed to get current user:', error);
+      console.error("Failed to get current user:", error);
       return null;
     }
   }
@@ -540,7 +581,7 @@ export class FlowAccountProofService {
       const user = await this.getCurrentUser();
       return user?.loggedIn || false;
     } catch (error) {
-      console.error('Authentication failed:', error);
+      console.error("Authentication failed:", error);
       return false;
     }
   }
@@ -567,29 +608,34 @@ export class FlowAccountProofService {
   } {
     // Convert COA proof components to circuit-compatible format
     // Hash components to hide actual values while preserving proof capability
-    const hash1 = require('crypto').createHash('sha256')
+    const hash1 = require("crypto")
+      .createHash("sha256")
       .update(coaProof.coaOwnershipProof.address.hex)
-      .digest('hex');
-    
-    const hash2 = require('crypto').createHash('sha256')
+      .digest("hex");
+
+    const hash2 = require("crypto")
+      .createHash("sha256")
       .update(JSON.stringify(coaProof.coaOwnershipProof.keyIndices))
-      .digest('hex');
-    
-    const hash3 = require('crypto').createHash('sha256')
+      .digest("hex");
+
+    const hash3 = require("crypto")
+      .createHash("sha256")
       .update(JSON.stringify(coaProof.coaOwnershipProof.signatures))
-      .digest('hex');
-    
-    const hash4 = require('crypto').createHash('sha256')
+      .digest("hex");
+
+    const hash4 = require("crypto")
+      .createHash("sha256")
       .update(coaProof.signedData.hash)
-      .digest('hex');
-    
-    const challengeHash = require('crypto').createHash('sha256')
+      .digest("hex");
+
+    const challengeHash = require("crypto")
+      .createHash("sha256")
       .update(challenge)
-      .digest('hex');
-    
+      .digest("hex");
+
     return {
       accountProofData: [hash1, hash2, hash3, hash4],
-      challengeHash
+      challengeHash,
     };
   }
 
@@ -608,16 +654,24 @@ export class FlowAccountProofService {
   } {
     // Convert account data to circuit-compatible format
     // Hash components to hide actual values
-    const hash1 = createHash('sha256').update(accountProofData.address).digest('hex');
-    const hash2 = createHash('sha256').update(accountProofData.signature).digest('hex');
-    const hash3 = createHash('sha256').update(accountProofData.keyId.toString()).digest('hex');
-    const hash4 = createHash('sha256').update(accountProofData.timestamp.toString()).digest('hex');
-    
-    const challengeHash = createHash('sha256').update(challenge).digest('hex');
-    
+    const hash1 = createHash("sha256")
+      .update(accountProofData.address)
+      .digest("hex");
+    const hash2 = createHash("sha256")
+      .update(accountProofData.signature)
+      .digest("hex");
+    const hash3 = createHash("sha256")
+      .update(accountProofData.keyId.toString())
+      .digest("hex");
+    const hash4 = createHash("sha256")
+      .update(accountProofData.timestamp.toString())
+      .digest("hex");
+
+    const challengeHash = createHash("sha256").update(challenge).digest("hex");
+
     return {
       accountProofData: [hash1, hash2, hash3, hash4],
-      challengeHash
+      challengeHash,
     };
   }
 }

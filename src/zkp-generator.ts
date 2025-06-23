@@ -1,7 +1,8 @@
-import * as snarkjs from "snarkjs";
 import { createHash } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
+
+const snarkjs = require("snarkjs");
 
 /**
  * ZKP Generator for Flow Account Signatures
@@ -44,8 +45,10 @@ export class ZKPGenerator {
     circuitZkeyPath?: string,
     vkeyPath?: string
   ) {
-    this.circuitWasmPath = circuitWasmPath || "./circuits/build/flow-signature.wasm";
-    this.circuitZkeyPath = circuitZkeyPath || "./circuits/build/flow-signature_0001.zkey";
+    this.circuitWasmPath =
+      circuitWasmPath || "./circuits/build/flow-signature.wasm";
+    this.circuitZkeyPath =
+      circuitZkeyPath || "./circuits/build/flow-signature_0001.zkey";
     this.vkeyPath = vkeyPath || "./circuits/build/verification_key.json";
   }
 
@@ -72,14 +75,17 @@ export class ZKPGenerator {
       return {
         proof: {
           pi_a: [proof.pi_a[0], proof.pi_a[1]],
-          pi_b: [[proof.pi_b[0][1], proof.pi_b[0][0]], [proof.pi_b[1][1], proof.pi_b[1][0]]],
-          pi_c: [proof.pi_c[0], proof.pi_c[1]]
+          pi_b: [
+            [proof.pi_b[0][1], proof.pi_b[0][0]],
+            [proof.pi_b[1][1], proof.pi_b[1][0]],
+          ],
+          pi_c: [proof.pi_c[0], proof.pi_c[1]],
         },
-        publicSignals: publicSignals.map(signal => signal.toString())
+        publicSignals: publicSignals.map((signal: any) => signal.toString()),
       };
     } catch (error) {
       console.error("Error generating proof:", error);
-      throw new Error(`Proof generation failed: ${error.message}`);
+      throw new Error(`Proof generation failed: ${(error as Error).message}`);
     }
   }
 
@@ -89,7 +95,10 @@ export class ZKPGenerator {
    * @param publicSignals Public signals
    * @returns Promise<boolean>
    */
-  async verifyProof(proof: ZKProof["proof"], publicSignals: string[]): Promise<boolean> {
+  async verifyProof(
+    proof: ZKProof["proof"],
+    publicSignals: string[]
+  ): Promise<boolean> {
     try {
       // Load verification key
       const vKey = JSON.parse(fs.readFileSync(this.vkeyPath, "utf-8"));
@@ -110,19 +119,13 @@ export class ZKPGenerator {
    */
   formatProofForContract(zkProof: ZKProof): ProofComponents {
     return {
-      proof_a: [
-        zkProof.proof.pi_a[0],
-        zkProof.proof.pi_a[1]
-      ],
+      proof_a: [zkProof.proof.pi_a[0], zkProof.proof.pi_a[1]],
       proof_b: [
         [zkProof.proof.pi_b[0][0], zkProof.proof.pi_b[0][1]],
-        [zkProof.proof.pi_b[1][0], zkProof.proof.pi_b[1][1]]
+        [zkProof.proof.pi_b[1][0], zkProof.proof.pi_b[1][1]],
       ],
-      proof_c: [
-        zkProof.proof.pi_c[0],
-        zkProof.proof.pi_c[1]
-      ],
-      publicInputs: zkProof.publicSignals
+      proof_c: [zkProof.proof.pi_c[0], zkProof.proof.pi_c[1]],
+      publicInputs: zkProof.publicSignals,
     };
   }
 
@@ -133,28 +136,24 @@ export class ZKPGenerator {
    */
   generateMockProof(inputs: CircuitInputs): ProofComponents {
     // Generate deterministic but fake proof components for testing
-    const hash = createHash('sha256').update(JSON.stringify(inputs)).digest('hex');
-    
+    const hash = createHash("sha256")
+      .update(JSON.stringify(inputs))
+      .digest("hex");
+
     return {
-      proof_a: [
-        '0x' + hash.slice(0, 64),
-        '0x' + hash.slice(64, 128)
-      ],
+      proof_a: ["0x" + hash.slice(0, 64), "0x" + hash.slice(64, 128)],
       proof_b: [
-        ['0x' + hash.slice(0, 64), '0x' + hash.slice(64, 128)],
-        ['0x' + hash.slice(128, 192), '0x' + hash.slice(192, 256)]
+        ["0x" + hash.slice(0, 64), "0x" + hash.slice(64, 128)],
+        ["0x" + hash.slice(128, 192), "0x" + hash.slice(192, 256)],
       ],
-      proof_c: [
-        '0x' + hash.slice(0, 64),
-        '0x' + hash.slice(64, 128)
-      ],
+      proof_c: ["0x" + hash.slice(0, 64), "0x" + hash.slice(64, 128)],
       publicInputs: [
         this.hexToBigInt(inputs.messageHash).toString(),
         this.hexToBigInt(inputs.publicKeyX).toString(),
         this.hexToBigInt(inputs.publicKeyY).toString(),
         this.hexToBigInt(inputs.accountAddress).toString(),
-        inputs.nonce
-      ]
+        inputs.nonce,
+      ],
     };
   }
 
@@ -163,26 +162,26 @@ export class ZKPGenerator {
    * @param inputs Inputs to validate
    */
   private validateInputs(inputs: CircuitInputs): void {
-    if (!inputs.messageHash || !inputs.messageHash.startsWith('0x')) {
-      throw new Error('Invalid messageHash format');
+    if (!inputs.messageHash || !inputs.messageHash.startsWith("0x")) {
+      throw new Error("Invalid messageHash format");
     }
-    if (!inputs.publicKeyX || !inputs.publicKeyX.startsWith('0x')) {
-      throw new Error('Invalid publicKeyX format');
+    if (!inputs.publicKeyX || !inputs.publicKeyX.startsWith("0x")) {
+      throw new Error("Invalid publicKeyX format");
     }
-    if (!inputs.publicKeyY || !inputs.publicKeyY.startsWith('0x')) {
-      throw new Error('Invalid publicKeyY format');
+    if (!inputs.publicKeyY || !inputs.publicKeyY.startsWith("0x")) {
+      throw new Error("Invalid publicKeyY format");
     }
-    if (!inputs.accountAddress || !inputs.accountAddress.startsWith('0x')) {
-      throw new Error('Invalid accountAddress format');
+    if (!inputs.accountAddress || !inputs.accountAddress.startsWith("0x")) {
+      throw new Error("Invalid accountAddress format");
     }
     if (!inputs.nonce || isNaN(Number(inputs.nonce))) {
-      throw new Error('Invalid nonce format');
+      throw new Error("Invalid nonce format");
     }
     if (!Array.isArray(inputs.signature) || inputs.signature.length !== 2) {
-      throw new Error('Invalid signature format');
+      throw new Error("Invalid signature format");
     }
-    if (!inputs.privateKey || !inputs.privateKey.startsWith('0x')) {
-      throw new Error('Invalid privateKey format');
+    if (!inputs.privateKey || !inputs.privateKey.startsWith("0x")) {
+      throw new Error("Invalid privateKey format");
     }
   }
 
@@ -200,9 +199,9 @@ export class ZKPGenerator {
       nonce: inputs.nonce,
       signature: [
         this.hexToBigInt(inputs.signature[0]).toString(),
-        this.hexToBigInt(inputs.signature[1]).toString()
+        this.hexToBigInt(inputs.signature[1]).toString(),
       ],
-      privateKey: this.hexToBigInt(inputs.privateKey).toString()
+      privateKey: this.hexToBigInt(inputs.privateKey).toString(),
     };
   }
 
@@ -221,17 +220,22 @@ export class ZKPGenerator {
    * @param ptauPath Path to powers of tau file
    * @returns Promise<void>
    */
-  async generateTrustedSetup(circuitPath: string, ptauPath: string): Promise<void> {
+  async generateTrustedSetup(
+    circuitPath: string,
+    ptauPath: string
+  ): Promise<void> {
     try {
       console.log("Generating trusted setup...");
-      
+
       // Generate zkey file
       await snarkjs.groth16.setup(circuitPath, ptauPath, this.circuitZkeyPath);
-      
+
       // Export verification key
-      const vKey = await snarkjs.zKey.exportVerificationKey(this.circuitZkeyPath);
+      const vKey = await snarkjs.zKey.exportVerificationKey(
+        this.circuitZkeyPath
+      );
       fs.writeFileSync(this.vkeyPath, JSON.stringify(vKey, null, 2));
-      
+
       console.log("Trusted setup generated successfully");
     } catch (error) {
       console.error("Error generating trusted setup:", error);
@@ -246,7 +250,9 @@ export class ZKPGenerator {
    */
   async exportSolidityVerifier(outputPath: string): Promise<void> {
     try {
-      const solidityCode = await snarkjs.zKey.exportSolidityVerifier(this.circuitZkeyPath);
+      const solidityCode = await snarkjs.zKey.exportSolidityVerifier(
+        this.circuitZkeyPath
+      );
       fs.writeFileSync(outputPath, solidityCode);
       console.log(`Solidity verifier exported to ${outputPath}`);
     } catch (error) {
@@ -260,9 +266,11 @@ export class ZKPGenerator {
    * @returns boolean
    */
   circuitFilesExist(): boolean {
-    return fs.existsSync(this.circuitWasmPath) && 
-           fs.existsSync(this.circuitZkeyPath) && 
-           fs.existsSync(this.vkeyPath);
+    return (
+      fs.existsSync(this.circuitWasmPath) &&
+      fs.existsSync(this.circuitZkeyPath) &&
+      fs.existsSync(this.vkeyPath)
+    );
   }
 
   /**
@@ -272,12 +280,12 @@ export class ZKPGenerator {
    */
   async batchGenerateProofs(inputsArray: CircuitInputs[]): Promise<ZKProof[]> {
     const proofs: ZKProof[] = [];
-    
+
     for (const inputs of inputsArray) {
       const proof = await this.generateProof(inputs);
       proofs.push(proof);
     }
-    
+
     return proofs;
   }
 
@@ -288,16 +296,11 @@ export class ZKPGenerator {
    */
   createUserOperationSignature(proof: ProofComponents): string {
     // Encode proof components for UserOperation.signature field
-    const abiCoder = new (require('ethers').utils.AbiCoder)();
-    
+    const abiCoder = new (require("ethers").utils.AbiCoder)();
+
     return abiCoder.encode(
-      ['uint256[2]', 'uint256[2][2]', 'uint256[2]', 'uint256[]'],
-      [
-        proof.proof_a,
-        proof.proof_b,
-        proof.proof_c,
-        proof.publicInputs
-      ]
+      ["uint256[2]", "uint256[2][2]", "uint256[2]", "uint256[]"],
+      [proof.proof_a, proof.proof_b, proof.proof_c, proof.publicInputs]
     );
   }
 }

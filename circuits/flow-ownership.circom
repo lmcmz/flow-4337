@@ -1,15 +1,15 @@
 pragma circom 2.0.0;
 
-include "circomlib/circuits/poseidon.circom";
-include "circomlib/circuits/comparators.circom";
+include "../node_modules/circomlib/circuits/poseidon.circom";
+include "../node_modules/circomlib/circuits/comparators.circom";
 
 // Privacy-preserving Flow account ownership proof
 // Proves ownership without revealing public key or account identity
 template FlowAccountOwnership() {
     // Private inputs (witness) - never revealed
-    signal private input accountProofData[4];   // Flow account-proof verification data
-    signal private input salt;                  // Random salt for commitment
-    signal private input nullifierSecret;      // Secret for nullifier generation
+    signal input accountProofData[4];   // Flow account-proof verification data
+    signal input salt;                  // Random salt for commitment
+    signal input nullifierSecret;      // Secret for nullifier generation
     
     // Public inputs - visible on-chain
     signal input commitment;                    // Hash(accountProofData, salt)
