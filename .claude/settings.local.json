@@ -9,7 +9,15 @@
       "Bash(git push:*)",
       "WebFetch(domain:github.com)",
       "Bash(git pull:*)",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "Bash(git checkout:*)",
+      "Bash(rm:*)",
+      "Bash(find:*)",
+      "Bash(npm run compile:*)",
+      "Bash(npm run:*)",
+      "Bash(npx hardhat:*)",
+      "Bash(mv:*)",
+      "Bash(grep:*)"
     ],
     "deny": []
   }
