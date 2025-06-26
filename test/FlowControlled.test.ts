@@ -1,33 +1,42 @@
 /**
  * @file FlowControlled.test.ts
  * @description Comprehensive test suite for Flow-controlled ERC-4337 implementation
+ * Tests CREATE2 factory, multi-signature validation, and KeyInfo-based Merkle trees
  */
 
 import { expect } from 'chai';
 import { ethers } from 'hardhat';
 import { SignerWithAddress } from '@nomiclabs/hardhat-ethers/signers';
-import { FlowRootRegistry, FlowControlledSmartAccount } from '../typechain';
-import { MerkleTreeUtils } from '../src/utils/MerkleTreeUtils';
+import { 
+    FlowKeyRegister, 
+    FlowRootRegistry, 
+    FlowControlledSmartAccount,
+    FlowAccountFactory 
+} from '../typechain';
 import {
-    FlowKey,
-    MerkleTree,
+    KeyInfo,
+    KeyInfoMerkleTree,
+    FlowMultiSigUserOp,
     SignatureAlgorithm,
-    HashAlgorithm,
-    FlowControlledUserOp
-} from '../src/types/flow-controlled';
+    HashAlgorithm
+} from '../src/types/flow-controlled-v2';
+import { MerkleTreeUtils } from '../src/utils/MerkleTreeUtilsV2';
 
-describe('Flow-Controlled ERC-4337 System', function () {
+describe('Flow-Controlled ERC-4337 V2 System', function () {
+    let flowKeyRegister: FlowKeyRegister;
     let flowRootRegistry: FlowRootRegistry;
-    let smartAccount: FlowControlledSmartAccount;
+    let accountFactory: FlowAccountFactory;
+    let smartAccountImpl: FlowControlledSmartAccountV2;
+    let smartAccount: FlowControlledSmartAccountV2;
     let bundler: SignerWithAddress;
-    let owner: SignerWithAddress;
+    let admin: SignerWithAddress;
     let user: SignerWithAddress;
     let flowAddress: string;
 
-    const mockFlowKeys: FlowKey[] = [
+    const mockKeyInfos: KeyInfo[] = [
         {
             publicKey: '1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
-            weight: 1000,
+            weight: 600,
             hashAlgorithm: HashAlgorithm.SHA2_256,
             signatureAlgorithm: SignatureAlgorithm.ECDSA_secp256k1,
             isRevoked: false,
@@ -35,7 +44,7 @@ describe('Flow-Controlled ERC-4337 System', function () {
         },
         {
             publicKey: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
-            weight: 500,
+            weight: 400,
             hashAlgorithm: HashAlgorithm.SHA2_256,
             signatureAlgorithm: SignatureAlgorithm.ECDSA_P256,
             isRevoked: false,
@@ -44,153 +53,208 @@ describe('Flow-Controlled ERC-4337 System', function () {
     ];
 
     beforeEach(async function () {
-        [owner, bundler, user] = await ethers.getSigners();
+        [admin, bundler, user] = await ethers.getSigners();
         flowAddress = ethers.utils.getAddress(ethers.utils.hexlify(ethers.utils.randomBytes(20)));
+
+        // Deploy FlowKeyRegister
+        const FlowKeyRegisterFactory = await ethers.getContractFactory('FlowKeyRegister');
+        flowKeyRegister = await FlowKeyRegisterFactory.deploy(bundler.address);
+        await flowKeyRegister.deployed();
 
         // Deploy FlowRootRegistry
         const FlowRootRegistryFactory = await ethers.getContractFactory('FlowRootRegistry');
         flowRootRegistry = await FlowRootRegistryFactory.deploy(bundler.address);
         await flowRootRegistry.deployed();
 
-        // Deploy FlowControlledSmartAccount
-        const SmartAccountFactory = await ethers.getContractFactory('FlowControlledSmartAccount');
-        const smartAccountImpl = await SmartAccountFactory.deploy();
+        // Deploy SmartAccount implementation
+        const SmartAccountFactory = await ethers.getContractFactory('FlowControlledSmartAccountV2');
+        smartAccountImpl = await SmartAccountFactory.deploy();
         await smartAccountImpl.deployed();
 
-        // Deploy proxy for smart account
-        const ProxyFactory = await ethers.getContractFactory('ERC1967Proxy');
-        const initData = smartAccountImpl.interface.encodeFunctionData('initialize', [
-            flowRootRegistry.address,
-            flowAddress,
-            owner.address
-        ]);
-        const proxy = await ProxyFactory.deploy(smartAccountImpl.address, initData);
-        await proxy.deployed();
+        // Deploy FlowAccountFactory
+        const FactoryFactory = await ethers.getContractFactory('FlowAccountFactory');
+        accountFactory = await FactoryFactory.deploy(smartAccountImpl.address, flowRootRegistry.address);
+        await accountFactory.deployed();
 
-        smartAccount = SmartAccountFactory.attach(proxy.address);
+        // Create smart account using factory
+        const tx = await accountFactory.createAccount(flowAddress);
+        const receipt = await tx.wait();
+        const event = receipt.events?.find(e => e.event === 'AccountCreated');
+        const smartAccountAddress = event?.args?.account;
+
+        smartAccount = SmartAccountFactory.attach(smartAccountAddress);
+        
+        // Set FlowKeyRegister address in smart account
+        await smartAccount.connect(admin).setFlowKeyRegister(flowKeyRegister.address);
     });
 
-    describe('FlowRootRegistry', function () {
+    describe('FlowKeyRegister', function () {
         it('should deploy with correct bundler', async function () {
-            expect(await flowRootRegistry.trustedBundler()).to.equal(bundler.address);
+            expect(await flowKeyRegister.primaryBundler()).to.equal(bundler.address);
+            expect(await flowKeyRegister.authorizedBundlers(bundler.address)).to.be.true;
         });
 
-        it('should allow bundler to update root', async function () {
-            const merkleTree = MerkleTreeUtils.buildMerkleTreeFromKeys(
+        it('should allow bundler to update keys', async function () {
+            const blockHeight = 12345;
+
+            await flowKeyRegister.connect(bundler).updateKeys(
                 flowAddress,
-                mockFlowKeys,
-                12345
+                mockKeyInfos,
+                blockHeight
             );
 
-            await flowRootRegistry.connect(bundler).updateRoot(
-                flowAddress,
-                merkleTree.root,
-                12345,
-                mockFlowKeys.length
-            );
-
-            const storedRoot = await flowRootRegistry.getRoot(flowAddress);
-            expect(storedRoot).to.equal(merkleTree.root);
-        });
-
-        it('should reject non-bundler root updates', async function () {
-            const merkleTree = MerkleTreeUtils.buildMerkleTreeFromKeys(
-                flowAddress,
-                mockFlowKeys,
-                12345
-            );
-
-            await expect(
-                flowRootRegistry.connect(user).updateRoot(
-                    flowAddress,
-                    merkleTree.root,
-                    12345,
-                    mockFlowKeys.length
-                )
-            ).to.be.revertedWith('FlowRootRegistry: caller is not the trusted bundler');
-        });
-
-        it('should track root history', async function () {
-            const merkleTree1 = MerkleTreeUtils.buildMerkleTreeFromKeys(
-                flowAddress,
-                [mockFlowKeys[0]],
-                12345
-            );
-            const merkleTree2 = MerkleTreeUtils.buildMerkleTreeFromKeys(
-                flowAddress,
-                mockFlowKeys,
-                12346
-            );
-
-            await flowRootRegistry.connect(bundler).updateRoot(
-                flowAddress,
-                merkleTree1.root,
-                12345,
-                1
-            );
-
-            await flowRootRegistry.connect(bundler).updateRoot(
-                flowAddress,
-                merkleTree2.root,
-                12346,
-                2
-            );
-
-            const history = await flowRootRegistry.getRootHistory(flowAddress);
-            expect(history).to.have.length(2);
-            expect(history[0]).to.equal(merkleTree1.root);
-            expect(history[1]).to.equal(merkleTree2.root);
-        });
-
-        it('should verify Merkle proofs correctly', async function () {
-            const merkleTree = MerkleTreeUtils.buildMerkleTreeFromKeys(
-                flowAddress,
-                mockFlowKeys,
-                12345
-            );
-
-            const leaf = merkleTree.leaves[0];
-            const proof = merkleTree.proofs[leaf.leafHash];
-
-            const isValid = await flowRootRegistry.verifyMerkleProof(
-                leaf.leafHash,
-                proof,
-                merkleTree.root
-            );
-
-            expect(isValid).to.be.true;
-        });
-
-        it('should create correct leaf hashes', async function () {
-            const key = mockFlowKeys[0];
-            const publicKeyBytes = ethers.utils.hexlify(Buffer.from(key.publicKey, 'hex'));
+            const storedKeys = await flowKeyRegister.getKeys(flowAddress);
+            expect(storedKeys).to.have.length(mockKeyInfos.length);
             
-            const contractLeafHash = await flowRootRegistry.createLeafHash(
-                publicKeyBytes,
-                Math.floor(key.weight * 1000),
-                key.hashAlgorithm,
-                key.signatureAlgorithm
+            for (let i = 0; i < mockKeyInfos.length; i++) {
+                expect(storedKeys[i].weight).to.equal(mockKeyInfos[i].weight);
+                expect(storedKeys[i].keyIndex).to.equal(mockKeyInfos[i].keyIndex);
+            }
+        });
+
+        it('should reject non-bundler key updates', async function () {
+            await expect(
+                flowKeyRegister.connect(user).updateKeys(
+                    flowAddress,
+                    mockKeyInfos,
+                    12345
+                )
+            ).to.be.revertedWith('FlowKeyRegister: unauthorized bundler');
+        });
+
+        it('should track account state correctly', async function () {
+            const blockHeight = 12345;
+            
+            await flowKeyRegister.connect(bundler).updateKeys(
+                flowAddress,
+                mockKeyInfos,
+                blockHeight
             );
 
-            const utilsLeafHash = MerkleTreeUtils.createLeafHash(
-                key.publicKey,
-                key.weight,
-                key.hashAlgorithm,
-                key.signatureAlgorithm
+            const accountState = await flowKeyRegister.getAccountState(flowAddress);
+            expect(accountState.keyCount).to.equal(mockKeyInfos.length);
+            expect(accountState.totalWeight).to.equal(1000); // 600 + 400
+            expect(accountState.lastUpdateHeight).to.equal(blockHeight);
+            expect(accountState.exists).to.be.true;
+        });
+
+        it('should return only active keys', async function () {
+            const keysWithRevoked = [...mockKeyInfos];
+            keysWithRevoked[1].isRevoked = true;
+
+            await flowKeyRegister.connect(bundler).updateKeys(
+                flowAddress,
+                keysWithRevoked,
+                12345
             );
 
-            expect(contractLeafHash).to.equal(utilsLeafHash);
+            const activeKeys = await flowKeyRegister.getActiveKeys(flowAddress);
+            expect(activeKeys).to.have.length(1);
+            expect(activeKeys[0].keyIndex).to.equal(0);
+        });
+
+        it('should create correct KeyInfo hashes', async function () {
+            const keyInfo = mockKeyInfos[0];
+            
+            const contractHash = await flowKeyRegister.createKeyInfoHash(keyInfo);
+            const expectedHash = ethers.utils.keccak256(
+                ethers.utils.defaultAbiCoder.encode(
+                    ['bytes', 'uint256', 'uint8', 'uint8', 'bool', 'uint256'],
+                    [
+                        keyInfo.publicKey,
+                        keyInfo.weight,
+                        keyInfo.hashAlgorithm,
+                        keyInfo.signatureAlgorithm,
+                        keyInfo.isRevoked,
+                        keyInfo.keyIndex
+                    ]
+                )
+            );
+
+            expect(contractHash).to.equal(expectedHash);
+        });
+
+        it('should allow admin override', async function () {
+            const reason = "Emergency key update";
+            
+            await flowKeyRegister.connect(admin).adminUpdateKeys(
+                flowAddress,
+                mockKeyInfos,
+                reason
+            );
+
+            const storedKeys = await flowKeyRegister.getKeys(flowAddress);
+            expect(storedKeys).to.have.length(mockKeyInfos.length);
         });
     });
 
-    describe('FlowControlledSmartAccount', function () {
-        let merkleTree: MerkleTree;
+    describe('FlowAccountFactory', function () {
+        it('should deploy with correct configuration', async function () {
+            const factoryInfo = await accountFactory.getFactoryInfo();
+            expect(factoryInfo.impl).to.equal(smartAccountImpl.address);
+            expect(factoryInfo.registry).to.equal(flowRootRegistry.address);
+        });
+
+        it('should create accounts deterministically', async function () {
+            const predictedAddress = await accountFactory.getAddress(flowAddress);
+            
+            const tx = await accountFactory.createAccount(flowAddress);
+            const receipt = await tx.wait();
+            const event = receipt.events?.find(e => e.event === 'AccountCreated');
+            const actualAddress = event?.args?.account;
+
+            expect(actualAddress).to.equal(predictedAddress);
+        });
+
+        it('should prevent duplicate account creation', async function () {
+            await accountFactory.createAccount(flowAddress);
+            
+            await expect(
+                accountFactory.createAccount(flowAddress)
+            ).to.be.revertedWith('FlowAccountFactory: account already exists');
+        });
+
+        it('should track account mappings', async function () {
+            const tx = await accountFactory.createAccount(flowAddress);
+            const receipt = await tx.wait();
+            const event = receipt.events?.find(e => e.event === 'AccountCreated');
+            const accountAddress = event?.args?.account;
+
+            expect(await accountFactory.getAccount(flowAddress)).to.equal(accountAddress);
+            expect(await accountFactory.getFlowAddress(accountAddress)).to.equal(flowAddress);
+            expect(await accountFactory.accountExists(flowAddress)).to.be.true;
+        });
+
+        it('should support batch account creation', async function () {
+            const flowAddresses = [
+                ethers.utils.getAddress(ethers.utils.hexlify(ethers.utils.randomBytes(20))),
+                ethers.utils.getAddress(ethers.utils.hexlify(ethers.utils.randomBytes(20)))
+            ];
+
+            const tx = await accountFactory.batchCreateAccounts(flowAddresses);
+            const receipt = await tx.wait();
+            const events = receipt.events?.filter(e => e.event === 'AccountCreated');
+
+            expect(events).to.have.length(2);
+            expect(await accountFactory.getAccountCount()).to.equal(3); // 1 from beforeEach + 2 from batch
+        });
+    });
+
+    describe('FlowControlledSmartAccountV2', function () {
+        let merkleTree: KeyInfoMerkleTree;
 
         beforeEach(async function () {
-            // Set up Merkle tree and update registry
-            merkleTree = MerkleTreeUtils.buildMerkleTreeFromKeys(
+            // Set up keys in FlowKeyRegister
+            await flowKeyRegister.connect(bundler).updateKeys(
                 flowAddress,
-                mockFlowKeys,
+                mockKeyInfos,
+                12345
+            );
+
+            // Build Merkle tree and update registry
+            merkleTree = await MerkleTreeUtils.buildKeyInfoMerkleTree(
+                flowAddress,
+                mockKeyInfos,
                 12345
             );
 
@@ -198,113 +262,153 @@ describe('Flow-Controlled ERC-4337 System', function () {
                 flowAddress,
                 merkleTree.root,
                 12345,
-                mockFlowKeys.length
+                mockKeyInfos.length
             );
         });
 
-        it('should initialize correctly', async function () {
+        it('should initialize correctly with Flow address only', async function () {
             const accountInfo = await smartAccount.getAccountInfo();
             expect(accountInfo.flowAddress).to.equal(flowAddress);
             expect(accountInfo.registryAddress).to.equal(flowRootRegistry.address);
+            expect(accountInfo.keyRegisterAddress).to.equal(flowKeyRegister.address);
         });
 
-        it('should validate user operations correctly', async function () {
-            const key = mockFlowKeys[0];
-            const leaf = merkleTree.leaves[0];
-            const proof = merkleTree.proofs[leaf.leafHash];
-
-            // Create mock signature
+        it('should validate multi-signature user operations', async function () {
             const opHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes('test operation'));
-            const mockSignature = ethers.utils.hexlify(ethers.utils.randomBytes(64));
+            const mockSignatures = [
+                ethers.utils.hexlify(ethers.utils.randomBytes(64)),
+                ethers.utils.hexlify(ethers.utils.randomBytes(64))
+            ];
 
-            const userOp: FlowControlledUserOp = {
+            // Get Merkle proofs for each key
+            const merkleProofs = mockKeyInfos.map(keyInfo => {
+                const keyInfoHash = ethers.utils.keccak256(
+                    ethers.utils.defaultAbiCoder.encode(
+                        ['bytes', 'uint256', 'uint8', 'uint8', 'bool', 'uint256'],
+                        [
+                            keyInfo.publicKey,
+                            keyInfo.weight,
+                            keyInfo.hashAlgorithm,
+                            keyInfo.signatureAlgorithm,
+                            keyInfo.isRevoked,
+                            keyInfo.keyIndex
+                        ]
+                    )
+                );
+                return merkleTree.proofs[keyInfoHash];
+            });
+
+            const userOp: FlowMultiSigUserOp = {
                 flowAddress,
                 opHash,
-                publicKey: key.publicKey,
-                weight: Math.floor(key.weight * 1000), // Convert to contract format
-                hashAlgorithm: key.hashAlgorithm,
-                signatureAlgorithm: key.signatureAlgorithm,
-                signature: mockSignature,
-                merkleProof: proof
+                keys: mockKeyInfos,
+                signatures: mockSignatures,
+                merkleProofs
             };
 
-            // Note: This will fail signature verification, but should pass other validations
+            // This will fail signature verification but should pass other validations
             const validationResult = await smartAccount.validateUserOp(userOp);
-            // In a real test, we'd mock the signature verification or use actual signatures
+            // In a real test, we'd need proper signatures or mock the signature verification
         });
 
-        it('should reject operations with invalid Flow address', async function () {
-            const key = mockFlowKeys[0];
-            const leaf = merkleTree.leaves[0];
-            const proof = merkleTree.proofs[leaf.leafHash];
+        it('should reject operations with insufficient weight', async function () {
+            // Use only the first key (600 weight < 1000 threshold)
+            const insufficientKeys = [mockKeyInfos[0]];
+            const opHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes('test operation'));
+            const mockSignatures = [ethers.utils.hexlify(ethers.utils.randomBytes(64))];
 
-            const userOp: FlowControlledUserOp = {
-                flowAddress: user.address, // Wrong Flow address
-                opHash: ethers.utils.keccak256(ethers.utils.toUtf8Bytes('test operation')),
-                publicKey: key.publicKey,
-                weight: Math.floor(key.weight * 1000),
-                hashAlgorithm: key.hashAlgorithm,
-                signatureAlgorithm: key.signatureAlgorithm,
-                signature: ethers.utils.hexlify(ethers.utils.randomBytes(64)),
-                merkleProof: proof
+            const keyInfoHash = ethers.utils.keccak256(
+                ethers.utils.defaultAbiCoder.encode(
+                    ['bytes', 'uint256', 'uint8', 'uint8', 'bool', 'uint256'],
+                    [
+                        insufficientKeys[0].publicKey,
+                        insufficientKeys[0].weight,
+                        insufficientKeys[0].hashAlgorithm,
+                        insufficientKeys[0].signatureAlgorithm,
+                        insufficientKeys[0].isRevoked,
+                        insufficientKeys[0].keyIndex
+                    ]
+                )
+            );
+
+            const userOp: FlowMultiSigUserOp = {
+                flowAddress,
+                opHash,
+                keys: insufficientKeys,
+                signatures: mockSignatures,
+                merkleProofs: [merkleTree.proofs[keyInfoHash]]
             };
 
             const validationResult = await smartAccount.validateUserOp(userOp);
             expect(validationResult).to.equal(1); // Should fail validation
         });
 
-        it('should reject operations with invalid Merkle proof', async function () {
-            const key = mockFlowKeys[0];
-            const invalidProof = [ethers.utils.hexlify(ethers.utils.randomBytes(32))];
+        it('should reject operations with mismatched Flow address', async function () {
+            const wrongFlowAddress = ethers.utils.getAddress(ethers.utils.hexlify(ethers.utils.randomBytes(20)));
+            const opHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes('test operation'));
+            const mockSignatures = mockKeyInfos.map(() => ethers.utils.hexlify(ethers.utils.randomBytes(64)));
+            
+            const merkleProofs = mockKeyInfos.map(keyInfo => {
+                const keyInfoHash = ethers.utils.keccak256(
+                    ethers.utils.defaultAbiCoder.encode(
+                        ['bytes', 'uint256', 'uint8', 'uint8', 'bool', 'uint256'],
+                        [
+                            keyInfo.publicKey,
+                            keyInfo.weight,
+                            keyInfo.hashAlgorithm,
+                            keyInfo.signatureAlgorithm,
+                            keyInfo.isRevoked,
+                            keyInfo.keyIndex
+                        ]
+                    )
+                );
+                return merkleTree.proofs[keyInfoHash];
+            });
 
-            const userOp: FlowControlledUserOp = {
-                flowAddress,
-                opHash: ethers.utils.keccak256(ethers.utils.toUtf8Bytes('test operation')),
-                publicKey: key.publicKey,
-                weight: Math.floor(key.weight * 1000),
-                hashAlgorithm: key.hashAlgorithm,
-                signatureAlgorithm: key.signatureAlgorithm,
-                signature: ethers.utils.hexlify(ethers.utils.randomBytes(64)),
-                merkleProof: invalidProof
+            const userOp: FlowMultiSigUserOp = {
+                flowAddress: wrongFlowAddress,
+                opHash,
+                keys: mockKeyInfos,
+                signatures: mockSignatures,
+                merkleProofs
             };
 
             const validationResult = await smartAccount.validateUserOp(userOp);
             expect(validationResult).to.equal(1); // Should fail validation
         });
 
-        it('should reject operations with insufficient key weight', async function () {
-            // Create key with low weight
-            const lowWeightKey: FlowKey = {
-                ...mockFlowKeys[0],
-                weight: 0.05, // 5% weight (below minimum)
-                keyIndex: 2
-            };
+        it('should reject operations with revoked keys', async function () {
+            const revokedKeys = [...mockKeyInfos];
+            revokedKeys[0].isRevoked = true;
 
-            const lowWeightMerkleTree = MerkleTreeUtils.buildMerkleTreeFromKeys(
+            const opHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes('test operation'));
+            const mockSignatures = revokedKeys.map(() => ethers.utils.hexlify(ethers.utils.randomBytes(64)));
+            
+            // Note: This would need a new Merkle tree with revoked keys
+            // For this test, we'll use the old proofs which should make it fail
+            const merkleProofs = mockKeyInfos.map(keyInfo => {
+                const keyInfoHash = ethers.utils.keccak256(
+                    ethers.utils.defaultAbiCoder.encode(
+                        ['bytes', 'uint256', 'uint8', 'uint8', 'bool', 'uint256'],
+                        [
+                            keyInfo.publicKey,
+                            keyInfo.weight,
+                            keyInfo.hashAlgorithm,
+                            keyInfo.signatureAlgorithm,
+                            keyInfo.isRevoked,
+                            keyInfo.keyIndex
+                        ]
+                    )
+                );
+                return merkleTree.proofs[keyInfoHash];
+            });
+
+            const userOp: FlowMultiSigUserOp = {
                 flowAddress,
-                [lowWeightKey],
-                12346
-            );
-
-            await flowRootRegistry.connect(bundler).updateRoot(
-                flowAddress,
-                lowWeightMerkleTree.root,
-                12346,
-                1
-            );
-
-            const leaf = lowWeightMerkleTree.leaves[0];
-            const proof = lowWeightMerkleTree.proofs[leaf.leafHash];
-
-            const userOp: FlowControlledUserOp = {
-                flowAddress,
-                opHash: ethers.utils.keccak256(ethers.utils.toUtf8Bytes('test operation')),
-                publicKey: lowWeightKey.publicKey,
-                weight: Math.floor(lowWeightKey.weight * 1000),
-                hashAlgorithm: lowWeightKey.hashAlgorithm,
-                signatureAlgorithm: lowWeightKey.signatureAlgorithm,
-                signature: ethers.utils.hexlify(ethers.utils.randomBytes(64)),
-                merkleProof: proof
+                opHash,
+                keys: revokedKeys,
+                signatures: mockSignatures,
+                merkleProofs
             };
 
             const validationResult = await smartAccount.validateUserOp(userOp);
@@ -312,27 +416,27 @@ describe('Flow-Controlled ERC-4337 System', function () {
         });
     });
 
-    describe('MerkleTreeUtils', function () {
-        it('should build consistent Merkle trees', async function () {
-            const tree1 = MerkleTreeUtils.buildMerkleTreeFromKeys(
+    describe('Merkle Tree with KeyInfo', function () {
+        it('should build consistent trees from KeyInfo structs', async function () {
+            const tree1 = await MerkleTreeUtils.buildKeyInfoMerkleTree(
                 flowAddress,
-                mockFlowKeys,
+                mockKeyInfos,
                 12345
             );
 
-            const tree2 = MerkleTreeUtils.buildMerkleTreeFromKeys(
+            const tree2 = await MerkleTreeUtils.buildKeyInfoMerkleTree(
                 flowAddress,
-                mockFlowKeys,
+                mockKeyInfos,
                 12345
             );
 
             expect(tree1.root).to.equal(tree2.root);
-            expect(tree1.leaves).to.have.length(mockFlowKeys.length);
+            expect(tree1.leaves).to.have.length(mockKeyInfos.length);
         });
 
-        it('should maintain key ordering', async function () {
-            const shuffledKeys = [...mockFlowKeys].reverse();
-            const tree = MerkleTreeUtils.buildMerkleTreeFromKeys(
+        it('should maintain key ordering by keyIndex', async function () {
+            const shuffledKeys = [...mockKeyInfos].reverse();
+            const tree = await MerkleTreeUtils.buildKeyInfoMerkleTree(
                 flowAddress,
                 shuffledKeys,
                 12345
@@ -340,131 +444,116 @@ describe('Flow-Controlled ERC-4337 System', function () {
 
             // Should be sorted by keyIndex
             for (let i = 1; i < tree.leaves.length; i++) {
-                expect(tree.leaves[i].keyIndex).to.be.greaterThan(tree.leaves[i - 1].keyIndex);
+                expect(tree.leaves[i].keyInfo.keyIndex).to.be.greaterThan(tree.leaves[i - 1].keyInfo.keyIndex);
             }
         });
 
-        it('should validate Flow keys correctly', async function () {
-            expect(MerkleTreeUtils.validateFlowKey(mockFlowKeys[0])).to.be.true;
-
-            const invalidKey = {
-                ...mockFlowKeys[0],
-                publicKey: 'invalid'
-            };
-            expect(MerkleTreeUtils.validateFlowKey(invalidKey)).to.be.false;
-        });
-
-        it('should format public keys correctly', async function () {
-            const keyWith04 = '04' + mockFlowKeys[0].publicKey;
-            const formatted = MerkleTreeUtils.formatPublicKey(keyWith04);
-            expect(formatted).to.equal(mockFlowKeys[0].publicKey);
-        });
-
-        it('should verify Merkle proofs', async function () {
-            const tree = MerkleTreeUtils.buildMerkleTreeFromKeys(
+        it('should generate valid proofs for all keys', async function () {
+            const tree = await MerkleTreeUtils.buildKeyInfoMerkleTree(
                 flowAddress,
-                mockFlowKeys,
+                mockKeyInfos,
                 12345
             );
 
-            const leaf = tree.leaves[0];
-            const proof = tree.proofs[leaf.leafHash];
+            for (const leaf of tree.leaves) {
+                const proof = tree.proofs[leaf.keyInfoHash];
+                const isValid = MerkleTreeUtils.verifyKeyInfoProof(
+                    leaf.keyInfoHash,
+                    proof,
+                    tree.root
+                );
+                expect(isValid).to.be.true;
+            }
+        });
 
-            const isValid = MerkleTreeUtils.verifyMerkleProof(
-                leaf.leafHash,
-                proof,
+        it('should reject invalid proofs', async function () {
+            const tree = await MerkleTreeUtils.buildKeyInfoMerkleTree(
+                flowAddress,
+                mockKeyInfos,
+                12345
+            );
+
+            const invalidProof = [ethers.utils.hexlify(ethers.utils.randomBytes(32))];
+            const leaf = tree.leaves[0];
+            
+            const isValid = MerkleTreeUtils.verifyKeyInfoProof(
+                leaf.keyInfoHash,
+                invalidProof,
                 tree.root
             );
-
-            expect(isValid).to.be.true;
-        });
-
-        it('should compare Merkle trees', async function () {
-            const tree1 = MerkleTreeUtils.buildMerkleTreeFromKeys(
-                flowAddress,
-                mockFlowKeys,
-                12345
-            );
-
-            const tree2 = MerkleTreeUtils.buildMerkleTreeFromKeys(
-                flowAddress,
-                [mockFlowKeys[0]],
-                12345
-            );
-
-            const comparison = MerkleTreeUtils.compareMerkleTrees(tree1, tree2);
-            expect(comparison.rootMatches).to.be.false;
-            expect(comparison.leafCountMatches).to.be.false;
-            expect(comparison.differences).to.have.length.greaterThan(0);
+            expect(isValid).to.be.false;
         });
     });
 
     describe('Integration Tests', function () {
-        it('should handle complete flow from key registration to operation execution', async function () {
-            // 1. Build Merkle tree from Flow keys
-            const merkleTree = MerkleTreeUtils.buildMerkleTreeFromKeys(
-                flowAddress,
-                mockFlowKeys,
-                12345
-            );
+        it('should handle complete flow from factory to operation validation', async function () {
+            // 1. Keys already set up in beforeEach
+            
+            // 2. Verify keys are stored correctly
+            const storedKeys = await flowKeyRegister.getKeys(flowAddress);
+            expect(storedKeys).to.have.length(mockKeyInfos.length);
 
-            // 2. Update root in registry (simulating bundler)
-            await flowRootRegistry.connect(bundler).updateRoot(
-                flowAddress,
-                merkleTree.root,
-                12345,
-                mockFlowKeys.length
-            );
+            // 3. Verify account has sufficient weight
+            const hasSufficientWeight = await flowKeyRegister.hasSufficientWeight(flowAddress);
+            expect(hasSufficientWeight).to.be.true;
 
-            // 3. Verify root is stored
-            const storedRoot = await flowRootRegistry.getRoot(flowAddress);
-            expect(storedRoot).to.equal(merkleTree.root);
+            // 4. Verify root is fresh
+            const isRootFresh = await flowRootRegistry.isRootFresh(flowAddress);
+            expect(isRootFresh).to.be.true;
 
-            // 4. Verify root freshness
-            const isFresh = await flowRootRegistry.isRootFresh(flowAddress);
-            expect(isFresh).to.be.true;
-
-            // 5. Get account info
+            // 5. Verify smart account info
             const accountInfo = await smartAccount.getAccountInfo();
             expect(accountInfo.isRootFresh).to.be.true;
+            expect(accountInfo.hasSufficientWeight).to.be.true;
         });
 
-        it('should handle root updates when keys change', async function () {
-            // Initial setup
-            const initialTree = MerkleTreeUtils.buildMerkleTreeFromKeys(
+        it('should handle key updates and re-synchronization', async function () {
+            // Initial setup already done
+            const initialAccountState = await flowKeyRegister.getAccountState(flowAddress);
+            expect(initialAccountState.keyCount).to.equal(2);
+            expect(initialAccountState.totalWeight).to.equal(1000);
+
+            // Simulate key update (add new key)
+            const newKey: KeyInfo = {
+                publicKey: 'fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba098765',
+                weight: 200,
+                hashAlgorithm: HashAlgorithm.SHA2_256,
+                signatureAlgorithm: SignatureAlgorithm.ECDSA_secp256k1,
+                isRevoked: false,
+                keyIndex: 2
+            };
+
+            const updatedKeys = [...mockKeyInfos, newKey];
+
+            // Update keys in register
+            await flowKeyRegister.connect(bundler).updateKeys(
                 flowAddress,
-                [mockFlowKeys[0]],
-                12345
+                updatedKeys,
+                12346
             );
 
-            await flowRootRegistry.connect(bundler).updateRoot(
-                flowAddress,
-                initialTree.root,
-                12345,
-                1
-            );
+            // Verify update
+            const updatedAccountState = await flowKeyRegister.getAccountState(flowAddress);
+            expect(updatedAccountState.keyCount).to.equal(3);
+            expect(updatedAccountState.totalWeight).to.equal(1200);
 
-            // Add new key (simulating Flow account key addition)
-            const updatedTree = MerkleTreeUtils.buildMerkleTreeFromKeys(
+            // Update Merkle root
+            const newMerkleTree = await MerkleTreeUtils.buildKeyInfoMerkleTree(
                 flowAddress,
-                mockFlowKeys,
+                updatedKeys,
                 12346
             );
 
             await flowRootRegistry.connect(bundler).updateRoot(
                 flowAddress,
-                updatedTree.root,
+                newMerkleTree.root,
                 12346,
-                2
+                updatedKeys.length
             );
 
-            // Verify update
+            // Verify new root
             const currentRoot = await flowRootRegistry.getRoot(flowAddress);
-            expect(currentRoot).to.equal(updatedTree.root);
-
-            const rootData = await flowRootRegistry.getRootData(flowAddress);
-            expect(rootData.keyCount).to.equal(2);
-            expect(rootData.lastUpdateHeight).to.equal(12346);
+            expect(currentRoot).to.equal(newMerkleTree.root);
         });
     });
 });

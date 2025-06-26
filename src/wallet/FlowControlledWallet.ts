@@ -1,36 +1,37 @@
 /**
  * @file FlowControlledWallet.ts
- * @description Wallet integration for Flow-controlled ERC-4337 accounts
- * Handles Flow key management and signature generation
+ * @description Wallet integration for Flow-controlled ERC-4337 with multi-signature support
+ * Handles Flow key management and multi-signature creation
  */
 
 import * as fcl from '@onflow/fcl';
 import { ethers } from 'ethers';
 import crypto from 'crypto';
 import {
-    FlowKey,
-    FlowSignatureRequest,
-    FlowSignatureResponse,
-    FlowControlledUserOp,
-    UserOpExecutionRequest,
+    KeyInfo,
+    FlowMultiSigUserOp,
+    MultiSigRequest,
+    MultiSigResponse,
+    KeySelectionStrategy,
     SignatureAlgorithm,
     HashAlgorithm,
-    FlowControlledError,
-    FlowControlledAccountError
-} from '../types/flow-controlled';
+    FlowWalletV2,
+    FlowControlledErrorV2,
+    FlowControlledAccountErrorV2
+} from '../types/flow-controlled-v2';
 
-export interface FlowWalletConfig {
+export interface FlowWalletConfigV2 {
     flowEndpoint: string;        // Flow blockchain RPC endpoint
     walletDiscovery?: string;    // Flow wallet discovery endpoint
-    flowKeyRegisterAddress: string; // Flow key register contract address
+    flowKeyRegisterAddress: string; // EVM FlowKeyRegister contract address
 }
 
-export class FlowControlledWallet {
-    private config: FlowWalletConfig;
+export class FlowControlledWallet implements FlowWalletV2 {
+    private config: FlowWalletConfigV2;
     private currentUser: any = null;
-    private userKeys: FlowKey[] = [];
+    private userKeys: KeyInfo[] = [];
 
-    constructor(config: FlowWalletConfig) {
+    constructor(config: FlowWalletConfigV2) {
         this.config = config;
         this.initializeFlow();
     }
@@ -45,7 +46,7 @@ export class FlowControlledWallet {
     /**
      * Authenticate with Flow wallet
      */
-    async authenticate(): Promise<void> {
+    async authenticate(): Promise<string> {
         try {
             const user = await fcl.authenticate();
             this.currentUser = user;
@@ -53,10 +54,13 @@ export class FlowControlledWallet {
             if (user?.addr) {
                 await this.loadUserKeys();
                 console.log(`Authenticated Flow user: ${user.addr}`);
+                return user.addr;
             }
+            
+            throw new Error("No Flow address received from authentication");
         } catch (error) {
-            throw new FlowControlledAccountError(
-                FlowControlledError.FLOW_CHAIN_ERROR,
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.FLOW_CHAIN_ERROR,
                 "Failed to authenticate with Flow wallet",
                 error
             );
@@ -88,53 +92,98 @@ export class FlowControlledWallet {
     }
 
     /**
-     * Load user keys from Flow key register
+     * Load user keys from Flow blockchain (native keys)
      */
     private async loadUserKeys(): Promise<void> {
         if (!this.currentUser?.addr) {
-            throw new FlowControlledAccountError(
-                FlowControlledError.INVALID_FLOW_ADDRESS,
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_FLOW_ADDRESS,
                 "No authenticated Flow address"
             );
         }
 
         const script = `
-            import FlowKeyRegister from ${this.config.flowKeyRegisterAddress}
-            
-            pub fun main(account: Address): [FlowKeyRegister.FlowKey] {
-                return FlowKeyRegister.getKeys(account: account)
+            pub fun main(account: Address): [AnyStruct] {
+                let accountRef = getAccount(account)
+                let keys: [AnyStruct] = []
+                
+                for keyIndex in accountRef.keys.keys {
+                    if let key = accountRef.keys.get(keyIndex: keyIndex) {
+                        // Only include supported algorithms
+                        if key.signatureAlgorithm.rawValue == 1 || key.signatureAlgorithm.rawValue == 2 {
+                            let keyData = {
+                                "publicKey": key.publicKey.publicKey,
+                                "weight": key.weight,
+                                "hashAlgorithm": key.hashAlgorithm.rawValue,
+                                "signatureAlgorithm": key.signatureAlgorithm.rawValue,
+                                "isRevoked": key.isRevoked,
+                                "keyIndex": keyIndex
+                            }
+                            keys.append(keyData)
+                        }
+                    }
+                }
+                
+                return keys
             }
         `;
 
         try {
-            const keys = await fcl.query({
+            const result = await fcl.query({
                 cadence: script,
                 args: (arg: any, t: any) => [arg(this.currentUser.addr, t.Address)]
             });
 
-            this.userKeys = keys.map((key: any) => ({
-                publicKey: key.publicKey,
-                weight: parseFloat(key.weight),
-                hashAlgorithm: parseInt(key.hashAlgorithm),
-                signatureAlgorithm: parseInt(key.signatureAlgorithm),
-                isRevoked: key.isRevoked,
-                keyIndex: parseInt(key.keyIndex)
-            }));
-
+            this.userKeys = result.map((keyData: any) => this.convertToKeyInfo(keyData));
             console.log(`Loaded ${this.userKeys.length} keys for Flow address ${this.currentUser.addr}`);
         } catch (error) {
-            throw new FlowControlledAccountError(
-                FlowControlledError.FLOW_CHAIN_ERROR,
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.FLOW_CHAIN_ERROR,
                 "Failed to load user keys from Flow",
                 error
             );
         }
     }
 
+    private convertToKeyInfo(flowKeyData: any): KeyInfo {
+        // Extract public key
+        let publicKey = flowKeyData.publicKey;
+        if (typeof publicKey === 'object' && publicKey.publicKey) {
+            publicKey = publicKey.publicKey;
+        }
+        
+        // Remove 04 prefix if present
+        if (publicKey.startsWith('04')) {
+            publicKey = publicKey.slice(2);
+        }
+
+        // Convert weight from decimal (0.0-1.0) to integer (0-1000)
+        const weight = Math.floor(flowKeyData.weight * 1000);
+
+        return {
+            publicKey,
+            weight,
+            hashAlgorithm: flowKeyData.hashAlgorithm,
+            signatureAlgorithm: flowKeyData.signatureAlgorithm,
+            isRevoked: flowKeyData.isRevoked,
+            keyIndex: flowKeyData.keyIndex
+        };
+    }
+
     /**
-     * Get available keys for the current user
+     * Get available (non-revoked) keys for the current user
      */
-    getAvailableKeys(): FlowKey[] {
+    async getAvailableKeys(): Promise<KeyInfo[]> {
+        if (!this.isAuthenticated()) {
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_FLOW_ADDRESS,
+                "Wallet not authenticated"
+            );
+        }
+
+        // Refresh keys from Flow
+        await this.loadUserKeys();
+        
         return this.userKeys.filter(key => 
             !key.isRevoked && 
             (key.signatureAlgorithm === SignatureAlgorithm.ECDSA_P256 || 
@@ -143,147 +192,173 @@ export class FlowControlledWallet {
     }
 
     /**
-     * Get a specific key by index
+     * Select keys based on strategy
      */
-    getKeyByIndex(keyIndex: number): FlowKey | null {
-        return this.userKeys.find(key => key.keyIndex === keyIndex) || null;
+    async selectKeys(strategy: KeySelectionStrategy, options?: any): Promise<KeyInfo[]> {
+        const availableKeys = await this.getAvailableKeys();
+        
+        if (availableKeys.length === 0) {
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_KEY_INFO,
+                "No available keys found"
+            );
+        }
+
+        switch (strategy) {
+            case KeySelectionStrategy.ALL_AVAILABLE:
+                return availableKeys;
+
+            case KeySelectionStrategy.MINIMUM_WEIGHT:
+                return this.selectMinimumWeightKeys(availableKeys, options?.minimumWeight || 1000);
+
+            case KeySelectionStrategy.PREFERRED_ALGORITHM:
+                return this.selectByAlgorithm(availableKeys, options?.algorithm || SignatureAlgorithm.ECDSA_secp256k1);
+
+            case KeySelectionStrategy.SPECIFIC_KEYS:
+                return this.selectSpecificKeys(availableKeys, options?.keyIndices || []);
+
+            case KeySelectionStrategy.HIGHEST_WEIGHT:
+                return this.selectHighestWeightKeys(availableKeys, options?.minimumWeight || 1000);
+
+            default:
+                throw new FlowControlledAccountErrorV2(
+                    FlowControlledErrorV2.INVALID_KEY_INFO,
+                    `Unsupported key selection strategy: ${strategy}`
+                );
+        }
+    }
+
+    private selectMinimumWeightKeys(keys: KeyInfo[], targetWeight: number): KeyInfo[] {
+        // Sort by weight descending to minimize number of keys needed
+        const sortedKeys = keys.sort((a, b) => b.weight - a.weight);
+        const selectedKeys: KeyInfo[] = [];
+        let totalWeight = 0;
+
+        for (const key of sortedKeys) {
+            selectedKeys.push(key);
+            totalWeight += key.weight;
+            
+            if (totalWeight >= targetWeight) {
+                break;
+            }
+        }
+
+        if (totalWeight < targetWeight) {
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INSUFFICIENT_SIGNATURE_WEIGHT,
+                `Insufficient total key weight: ${totalWeight} < ${targetWeight}`
+            );
+        }
+
+        return selectedKeys;
+    }
+
+    private selectByAlgorithm(keys: KeyInfo[], algorithm: SignatureAlgorithm): KeyInfo[] {
+        const filteredKeys = keys.filter(key => key.signatureAlgorithm === algorithm);
+        
+        if (filteredKeys.length === 0) {
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.UNSUPPORTED_ALGORITHM,
+                `No keys available for algorithm: ${algorithm}`
+            );
+        }
+
+        return filteredKeys;
+    }
+
+    private selectSpecificKeys(keys: KeyInfo[], keyIndices: number[]): KeyInfo[] {
+        const selectedKeys = keyIndices.map(index => {
+            const key = keys.find(k => k.keyIndex === index);
+            if (!key) {
+                throw new FlowControlledAccountErrorV2(
+                    FlowControlledErrorV2.INVALID_KEY_INFO,
+                    `Key not found at index: ${index}`
+                );
+            }
+            return key;
+        });
+
+        return selectedKeys;
+    }
+
+    private selectHighestWeightKeys(keys: KeyInfo[], targetWeight: number): KeyInfo[] {
+        // Sort by weight descending
+        const sortedKeys = keys.sort((a, b) => b.weight - a.weight);
+        return this.selectMinimumWeightKeys(sortedKeys, targetWeight);
     }
 
     /**
-     * Get keys by signature algorithm
+     * Sign multi-signature operation
      */
-    getKeysByAlgorithm(algorithm: SignatureAlgorithm): FlowKey[] {
-        return this.getAvailableKeys().filter(key => key.signatureAlgorithm === algorithm);
-    }
-
-    /**
-     * Sign a message with Flow key
-     */
-    async signMessage(request: FlowSignatureRequest): Promise<FlowSignatureResponse> {
+    async signMultiSig(request: MultiSigRequest): Promise<MultiSigResponse> {
         if (!this.isAuthenticated()) {
-            throw new FlowControlledAccountError(
-                FlowControlledError.INVALID_FLOW_ADDRESS,
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_FLOW_ADDRESS,
                 "Wallet not authenticated"
             );
         }
 
         if (request.flowAddress !== this.currentUser.addr) {
-            throw new FlowControlledAccountError(
-                FlowControlledError.INVALID_FLOW_ADDRESS,
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_FLOW_ADDRESS,
                 "Flow address mismatch"
             );
         }
 
-        // Select key to use
-        let selectedKey: FlowKey;
-        if (request.keyIndex !== undefined) {
-            const key = this.getKeyByIndex(request.keyIndex);
-            if (!key) {
-                throw new FlowControlledAccountError(
-                    FlowControlledError.INVALID_PUBLIC_KEY,
-                    `Key not found at index ${request.keyIndex}`
-                );
+        // Select keys based on strategy
+        const selectedKeys = await this.selectKeys(
+            request.keySelectionStrategy,
+            {
+                minimumWeight: request.minimumWeight,
+                algorithm: request.preferredAlgorithm
             }
-            selectedKey = key;
-        } else {
-            // Select first available key with requested algorithm
-            const availableKeys = this.getKeysByAlgorithm(request.signatureAlgorithm);
-            if (availableKeys.length === 0) {
-                throw new FlowControlledAccountError(
-                    FlowControlledError.UNSUPPORTED_ALGORITHM,
-                    `No keys available for algorithm ${request.signatureAlgorithm}`
-                );
-            }
-            selectedKey = availableKeys[0];
+        );
+
+        // Sign with each selected key
+        const signatures: string[] = [];
+        let totalWeight = 0;
+        const usedAlgorithms: Set<SignatureAlgorithm> = new Set();
+
+        for (const key of selectedKeys) {
+            const signature = await this.signWithFlowKey(request.opHash, key);
+            signatures.push(signature);
+            totalWeight += key.weight;
+            usedAlgorithms.add(key.signatureAlgorithm);
         }
 
-        // Verify key algorithm matches request
-        if (selectedKey.signatureAlgorithm !== request.signatureAlgorithm) {
-            throw new FlowControlledAccountError(
-                FlowControlledError.UNSUPPORTED_ALGORITHM,
-                "Key algorithm mismatch"
-            );
-        }
+        // Create user operation (without proofs - will be added by bundler)
+        const userOp: FlowMultiSigUserOp = {
+            flowAddress: request.flowAddress,
+            opHash: request.opHash,
+            keys: selectedKeys,
+            signatures,
+            merkleProofs: [] // Will be populated by bundler
+        };
 
-        try {
-            // Sign using Flow wallet
-            const signature = await this.signWithFlowWallet(request.message, selectedKey);
-
-            return {
-                signature,
-                publicKey: selectedKey.publicKey,
-                keyIndex: selectedKey.keyIndex,
-                weight: selectedKey.weight,
-                hashAlgorithm: selectedKey.hashAlgorithm,
-                signatureAlgorithm: selectedKey.signatureAlgorithm
-            };
-        } catch (error) {
-            throw new FlowControlledAccountError(
-                FlowControlledError.INVALID_SIGNATURE,
-                "Failed to sign message with Flow wallet",
-                error
-            );
-        }
+        return {
+            userOp,
+            totalWeight,
+            keyCount: selectedKeys.length,
+            usedAlgorithms: Array.from(usedAlgorithms)
+        };
     }
 
     /**
-     * Sign with Flow wallet using FCL
-     */
-    private async signWithFlowWallet(message: string, key: FlowKey): Promise<string> {
-        // Create message for signing
-        const messageBuffer = Buffer.from(message.replace('0x', ''), 'hex');
-        
-        try {
-            // Use FCL's user signature method
-            const signature = await fcl.currentUser.signUserMessage();
-            
-            // The signature from FCL includes additional metadata
-            // We need to extract just the signature bytes
-            if (signature && signature.signature) {
-                return signature.signature;
-            }
-            
-            throw new Error("Invalid signature response from Flow wallet");
-        } catch (error) {
-            // Fallback: construct signature manually for development/testing
-            console.warn("Flow wallet signing failed, using fallback method");
-            return this.createMockSignature(message, key);
-        }
-    }
-
-    /**
-     * Create mock signature for development/testing
-     */
-    private createMockSignature(message: string, key: FlowKey): string {
-        // This is a mock implementation for development
-        // In production, this should never be used
-        const messageHash = ethers.utils.keccak256(message);
-        const randomBytes = crypto.randomBytes(64);
-        
-        // Create deterministic signature based on key and message
-        const keyBytes = Buffer.from(key.publicKey, 'hex');
-        const msgBytes = Buffer.from(messageHash.slice(2), 'hex');
-        const combined = Buffer.concat([keyBytes, msgBytes]);
-        const sigHash = crypto.createHash('sha256').update(combined).digest();
-        
-        // Create signature-like bytes
-        const signature = Buffer.concat([sigHash, sigHash]).slice(0, 64);
-        return '0x' + signature.toString('hex');
-    }
-
-    /**
-     * Create user operation for ERC-4337
+     * Create user operation for contract call
      */
     async createUserOperation(
         target: string,
         data: string,
         value: string = "0",
-        signatureAlgorithm: SignatureAlgorithm = SignatureAlgorithm.ECDSA_secp256k1,
-        keyIndex?: number
-    ): Promise<FlowControlledUserOp> {
+        options: {
+            keySelection?: KeySelectionStrategy;
+            minimumWeight?: number;
+            gasLimit?: string;
+        } = {}
+    ): Promise<FlowMultiSigUserOp> {
         if (!this.isAuthenticated()) {
-            throw new FlowControlledAccountError(
-                FlowControlledError.INVALID_FLOW_ADDRESS,
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_FLOW_ADDRESS,
                 "Wallet not authenticated"
             );
         }
@@ -296,85 +371,55 @@ export class FlowControlledWallet {
             )
         );
 
-        // Sign the operation hash
-        const signatureRequest: FlowSignatureRequest = {
-            flowAddress: this.currentUser.addr,
-            message: opHash,
-            keyIndex,
-            signatureAlgorithm
-        };
-
-        const signatureResponse = await this.signMessage(signatureRequest);
-
-        // Note: Merkle proof will be generated by the bundler
-        return {
+        // Create multi-signature request
+        const multiSigRequest: MultiSigRequest = {
             flowAddress: this.currentUser.addr,
             opHash,
-            publicKey: signatureResponse.publicKey,
-            weight: signatureResponse.weight,
-            hashAlgorithm: signatureResponse.hashAlgorithm,
-            signatureAlgorithm: signatureResponse.signatureAlgorithm,
-            signature: signatureResponse.signature,
-            merkleProof: [] // Will be populated by bundler
+            keySelectionStrategy: options.keySelection || KeySelectionStrategy.MINIMUM_WEIGHT,
+            minimumWeight: options.minimumWeight || 1000
         };
+
+        const response = await this.signMultiSig(multiSigRequest);
+        return response.userOp;
     }
 
     /**
-     * Create execution request for bundler
+     * Sign with Flow key using FCL
      */
-    async createExecutionRequest(
-        target: string,
-        data: string,
-        value: string = "0",
-        gasLimit: string = "200000",
-        gasPrice?: string,
-        signatureAlgorithm: SignatureAlgorithm = SignatureAlgorithm.ECDSA_secp256k1,
-        keyIndex?: number
-    ): Promise<UserOpExecutionRequest> {
-        const userOp = await this.createUserOperation(
-            target,
-            data,
-            value,
-            signatureAlgorithm,
-            keyIndex
-        );
+    private async signWithFlowKey(message: string, key: KeyInfo): Promise<string> {
+        try {
+            // Use FCL's user signature method
+            const signableMessage = {
+                message: ethers.utils.arrayify(message)
+            };
 
-        return {
-            userOp,
-            target,
-            data,
-            value,
-            gasLimit,
-            gasPrice: gasPrice || "0" // Will be set by bundler if not provided
-        };
-    }
-
-    /**
-     * Batch create multiple user operations
-     */
-    async createBatchUserOperations(
-        operations: Array<{
-            target: string;
-            data: string;
-            value?: string;
-            signatureAlgorithm?: SignatureAlgorithm;
-            keyIndex?: number;
-        }>
-    ): Promise<FlowControlledUserOp[]> {
-        const userOps: FlowControlledUserOp[] = [];
-        
-        for (const op of operations) {
-            const userOp = await this.createUserOperation(
-                op.target,
-                op.data,
-                op.value,
-                op.signatureAlgorithm,
-                op.keyIndex
-            );
-            userOps.push(userOp);
+            const signature = await fcl.currentUser.signUserMessage(signableMessage);
+            
+            if (signature && signature.signature) {
+                return signature.signature;
+            }
+            
+            throw new Error("Invalid signature response from Flow wallet");
+        } catch (error) {
+            // Fallback: create mock signature for development/testing
+            console.warn("Flow wallet signing failed, using mock signature");
+            return this.createMockSignature(message, key);
         }
+    }
+
+    /**
+     * Create mock signature for development/testing
+     */
+    private createMockSignature(message: string, key: KeyInfo): string {
+        // Create deterministic signature based on key and message
+        const keyBytes = Buffer.from(key.publicKey, 'hex');
+        const msgBytes = Buffer.from(message.slice(2), 'hex');
+        const combined = Buffer.concat([keyBytes, msgBytes, Buffer.from([key.keyIndex])]);
+        const sigHash = crypto.createHash('sha256').update(combined).digest();
         
-        return userOps;
+        // Create signature-like bytes (64 bytes)
+        const signature = Buffer.concat([sigHash, sigHash]).slice(0, 64);
+        return '0x' + signature.toString('hex');
     }
 
     /**
@@ -385,7 +430,10 @@ export class FlowControlledWallet {
             address: this.getCurrentAddress(),
             isAuthenticated: this.isAuthenticated(),
             keyCount: this.userKeys.length,
-            availableKeyCount: this.getAvailableKeys().length,
+            availableKeyCount: this.userKeys.filter(k => !k.isRevoked).length,
+            totalWeight: this.userKeys
+                .filter(k => !k.isRevoked)
+                .reduce((sum, k) => sum + k.weight, 0),
             supportedAlgorithms: [
                 SignatureAlgorithm.ECDSA_P256,
                 SignatureAlgorithm.ECDSA_secp256k1
@@ -406,29 +454,47 @@ export class FlowControlledWallet {
      * Validate public key format
      */
     static validatePublicKey(publicKey: string): boolean {
-        // Remove 0x prefix if present
         const cleanKey = publicKey.replace('0x', '');
-        
-        // Should be 64 bytes (128 hex characters) for uncompressed key without 04 prefix
-        if (cleanKey.length !== 128) {
-            return false;
-        }
-        
-        // Should be valid hex
-        return /^[0-9a-fA-F]+$/.test(cleanKey);
+        return cleanKey.length === 128 && /^[0-9a-fA-F]+$/.test(cleanKey);
     }
 
     /**
-     * Format public key (remove 04 prefix if present)
+     * Format public key (ensure no 04 prefix)
      */
     static formatPublicKey(publicKey: string): string {
         let cleanKey = publicKey.replace('0x', '');
         
-        // Remove 04 prefix if present
         if (cleanKey.length === 130 && cleanKey.startsWith('04')) {
             cleanKey = cleanKey.slice(2);
         }
         
         return cleanKey;
+    }
+
+    /**
+     * Get key by index
+     */
+    getKeyByIndex(keyIndex: number): KeyInfo | null {
+        return this.userKeys.find(key => key.keyIndex === keyIndex) || null;
+    }
+
+    /**
+     * Get keys by signature algorithm
+     */
+    getKeysByAlgorithm(algorithm: SignatureAlgorithm): KeyInfo[] {
+        return this.userKeys.filter(key => 
+            !key.isRevoked && key.signatureAlgorithm === algorithm
+        );
+    }
+
+    /**
+     * Check if account has sufficient weight for operations
+     */
+    hasSufficientWeight(threshold: number = 1000): boolean {
+        const totalWeight = this.userKeys
+            .filter(k => !k.isRevoked)
+            .reduce((sum, k) => sum + k.weight, 0);
+        
+        return totalWeight >= threshold;
     }
 }

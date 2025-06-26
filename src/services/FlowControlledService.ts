@@ -1,37 +1,41 @@
 /**
  * @file FlowControlledService.ts
- * @description Main service class for Flow-controlled ERC-4337 accounts
- * Orchestrates bundler, wallet, and smart contract interactions
+ * @description Main service class for Flow-controlled ERC-4337 with multi-signature support
+ * Orchestrates CREATE2 factory, bundler, and wallet interactions
  */
 
 import { FlowControlledBundler } from '../bundler/FlowControlledBundler';
 import { FlowControlledWallet } from '../wallet/FlowControlledWallet';
 import {
-    BundlerConfig,
-    FlowWalletConfig,
-    UserOpExecutionRequest,
-    FlowControlledUserOp,
+    FlowControlledServiceConfigV2,
+    AccountCreationRequest,
+    AccountCreationResponse,
+    MultiSigRequest,
+    MultiSigResponse,
+    UserOpExecutionRequestV2,
+    BatchExecutionRequest,
+    KeySelectionStrategy,
     SignatureAlgorithm,
-    FlowControlledError,
-    FlowControlledAccountError
-} from '../types/flow-controlled';
-
-export interface FlowControlledServiceConfig {
-    bundler: BundlerConfig;
-    wallet: FlowWalletConfig;
-    smartAccountAddress?: string;
-}
+    BundlerStatsV2,
+    FlowAccountMonitorV2,
+    KeyMismatchResult,
+    FlowControlledErrorV2,
+    FlowControlledAccountErrorV2
+} from '../types/flow-controlled-v2';
 
 export class FlowControlledService {
     private bundler: FlowControlledBundler;
     private wallet: FlowControlledWallet;
-    private config: FlowControlledServiceConfig;
+    private config: FlowControlledServiceConfigV2;
     private isInitialized: boolean = false;
 
-    constructor(config: FlowControlledServiceConfig) {
+    constructor(config: FlowControlledServiceConfigV2) {
         this.config = config;
         this.bundler = new FlowControlledBundler(config.bundler);
-        this.wallet = new FlowControlledWallet(config.wallet);
+        this.wallet = new FlowControlledWallet({
+            flowEndpoint: config.bundler.flowEndpoint,
+            flowKeyRegisterAddress: config.flowKeyRegister
+        });
     }
 
     /**
@@ -46,14 +50,12 @@ export class FlowControlledService {
             // Start bundler service
             await this.bundler.start();
             
-            // Initialize wallet (doesn't auto-authenticate)
-            console.log("Flow-controlled service initialized");
-            
+            console.log("Flow-controlled service V2 initialized");
             this.isInitialized = true;
         } catch (error) {
-            throw new FlowControlledAccountError(
-                FlowControlledError.BUNDLER_NOT_AUTHORIZED,
-                "Failed to initialize Flow-controlled service",
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.BUNDLER_NOT_AUTHORIZED,
+                "Failed to initialize Flow-controlled service V2",
                 error
             );
         }
@@ -72,34 +74,33 @@ export class FlowControlledService {
             await this.wallet.disconnect();
             
             this.isInitialized = false;
-            console.log("Flow-controlled service shutdown");
+            console.log("Flow-controlled service V2 shutdown");
         } catch (error) {
             console.error("Error during service shutdown:", error);
         }
     }
 
     /**
-     * Authenticate with Flow wallet
+     * Authenticate with Flow wallet and set up account monitoring
      */
     async authenticateWallet(): Promise<string> {
-        await this.wallet.authenticate();
-        const address = this.wallet.getCurrentAddress();
+        const flowAddress = await this.wallet.authenticate();
         
-        if (!address) {
-            throw new FlowControlledAccountError(
-                FlowControlledError.INVALID_FLOW_ADDRESS,
+        if (!flowAddress) {
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_FLOW_ADDRESS,
                 "Failed to get Flow address after authentication"
             );
         }
 
         // Add Flow account to bundler monitoring
-        await this.bundler.addFlowAccount(address);
+        await this.bundler.addFlowAccount(flowAddress);
         
-        return address;
+        return flowAddress;
     }
 
     /**
-     * Disconnect wallet
+     * Disconnect wallet and stop monitoring
      */
     async disconnectWallet(): Promise<void> {
         const address = this.wallet.getCurrentAddress();
@@ -110,7 +111,32 @@ export class FlowControlledService {
     }
 
     /**
-     * Execute a smart contract call via Flow-controlled account
+     * Deploy or predict smart account address
+     */
+    async deploySmartAccount(
+        flowAddress?: string,
+        deployImmediately: boolean = true
+    ): Promise<AccountCreationResponse> {
+        const targetAddress = flowAddress || this.wallet.getCurrentAddress();
+        
+        if (!targetAddress) {
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_FLOW_ADDRESS,
+                "No Flow address provided or authenticated"
+            );
+        }
+
+        const request: AccountCreationRequest = {
+            flowAddress: targetAddress,
+            deployImmediately,
+            initialKeySync: true
+        };
+
+        return await this.bundler.deployAccount(request);
+    }
+
+    /**
+     * Execute a smart contract call with multi-signature
      */
     async executeCall(
         target: string,
@@ -119,36 +145,41 @@ export class FlowControlledService {
         options: {
             gasLimit?: string;
             gasPrice?: string;
-            signatureAlgorithm?: SignatureAlgorithm;
-            keyIndex?: number;
+            keySelection?: KeySelectionStrategy;
+            minimumWeight?: number;
+            preferredAlgorithm?: SignatureAlgorithm;
         } = {}
     ): Promise<string> {
         if (!this.wallet.isAuthenticated()) {
-            throw new FlowControlledAccountError(
-                FlowControlledError.INVALID_FLOW_ADDRESS,
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_FLOW_ADDRESS,
                 "Wallet not authenticated"
             );
         }
 
-        // Create execution request
-        const request = await this.wallet.createExecutionRequest(
+        const flowAddress = this.wallet.getCurrentAddress()!;
+
+        // Create multi-signature user operation
+        const multiSigUserOp = await this.wallet.createUserOperation(
             target,
             data,
             value,
-            options.gasLimit || "200000",
-            options.gasPrice,
-            options.signatureAlgorithm || SignatureAlgorithm.ECDSA_secp256k1,
-            options.keyIndex
+            {
+                keySelection: options.keySelection || KeySelectionStrategy.MINIMUM_WEIGHT,
+                minimumWeight: options.minimumWeight || 1000,
+                gasLimit: options.gasLimit || "200000"
+            }
         );
 
-        // Get Merkle proof from bundler
-        const proof = await this.bundler.getMerkleProof(
-            request.userOp.flowAddress,
-            request.userOp.publicKey
-        );
-        
-        // Update user operation with proof
-        request.userOp.merkleProof = proof;
+        // Create execution request
+        const request: UserOpExecutionRequestV2 = {
+            multiSigUserOp,
+            target,
+            data,
+            value,
+            gasLimit: options.gasLimit || "200000",
+            gasPrice: options.gasPrice
+        };
 
         // Process through bundler
         return await this.bundler.processUserOp(request);
@@ -162,45 +193,102 @@ export class FlowControlledService {
             target: string;
             data: string;
             value?: string;
-            signatureAlgorithm?: SignatureAlgorithm;
-            keyIndex?: number;
+            gasLimit?: string;
         }>,
         batchOptions: {
-            gasLimit?: string;
             gasPrice?: string;
+            keySelection?: KeySelectionStrategy;
+            minimumWeight?: number;
         } = {}
     ): Promise<string[]> {
         if (!this.wallet.isAuthenticated()) {
-            throw new FlowControlledAccountError(
-                FlowControlledError.INVALID_FLOW_ADDRESS,
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_FLOW_ADDRESS,
                 "Wallet not authenticated"
             );
         }
 
-        const requests: UserOpExecutionRequest[] = [];
-        
+        const userOps = [];
+        const targets = [];
+        const datas = [];
+        const values = [];
+        const gasLimits = [];
+
         for (const op of operations) {
-            const request = await this.wallet.createExecutionRequest(
+            const multiSigUserOp = await this.wallet.createUserOperation(
                 op.target,
                 op.data,
                 op.value || "0",
-                batchOptions.gasLimit || "200000",
-                batchOptions.gasPrice,
-                op.signatureAlgorithm || SignatureAlgorithm.ECDSA_secp256k1,
-                op.keyIndex
+                {
+                    keySelection: batchOptions.keySelection || KeySelectionStrategy.MINIMUM_WEIGHT,
+                    minimumWeight: batchOptions.minimumWeight || 1000,
+                    gasLimit: op.gasLimit || "200000"
+                }
             );
 
-            // Get Merkle proof
-            const proof = await this.bundler.getMerkleProof(
-                request.userOp.flowAddress,
-                request.userOp.publicKey
-            );
-            
-            request.userOp.merkleProof = proof;
-            requests.push(request);
+            userOps.push(multiSigUserOp);
+            targets.push(op.target);
+            datas.push(op.data);
+            values.push(op.value || "0");
+            gasLimits.push(op.gasLimit || "200000");
         }
 
-        return await this.bundler.batchProcessUserOps(requests);
+        const batchRequest: BatchExecutionRequest = {
+            userOps,
+            targets,
+            datas,
+            values,
+            gasLimits,
+            gasPrice: batchOptions.gasPrice
+        };
+
+        return await this.bundler.batchProcessUserOps(batchRequest);
+    }
+
+    /**
+     * Create multi-signature for custom operation
+     */
+    async createMultiSignature(request: MultiSigRequest): Promise<MultiSigResponse> {
+        if (!this.wallet.isAuthenticated()) {
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_FLOW_ADDRESS,
+                "Wallet not authenticated"
+            );
+        }
+
+        return await this.wallet.signMultiSig(request);
+    }
+
+    /**
+     * Check for key mismatches between Flow and EVM
+     */
+    async checkKeyMismatch(flowAddress?: string): Promise<KeyMismatchResult> {
+        const targetAddress = flowAddress || this.wallet.getCurrentAddress();
+        
+        if (!targetAddress) {
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_FLOW_ADDRESS,
+                "No Flow address provided or authenticated"
+            );
+        }
+
+        return await this.bundler.checkKeyMismatch(targetAddress);
+    }
+
+    /**
+     * Force synchronization of Flow keys to EVM
+     */
+    async syncKeys(flowAddress?: string): Promise<boolean> {
+        const targetAddress = flowAddress || this.wallet.getCurrentAddress();
+        
+        if (!targetAddress) {
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_FLOW_ADDRESS,
+                "No Flow address provided or authenticated"
+            );
+        }
+
+        return await this.bundler.syncKeys(targetAddress);
     }
 
     /**
@@ -210,9 +298,16 @@ export class FlowControlledService {
         const walletInfo = this.wallet.getWalletInfo();
         const bundlerStats = await this.bundler.getBundlerStats();
         
-        let accountState = null;
+        let accountState: FlowAccountMonitorV2 | null = null;
+        let keyMismatch: KeyMismatchResult | null = null;
+        
         if (walletInfo.address) {
-            accountState = await this.bundler.getFlowAccountState(walletInfo.address);
+            try {
+                accountState = await this.bundler.getFlowAccountState(walletInfo.address);
+                keyMismatch = await this.bundler.checkKeyMismatch(walletInfo.address);
+            } catch (error) {
+                // Account might not be monitored yet
+            }
         }
 
         return {
@@ -220,10 +315,13 @@ export class FlowControlledService {
             wallet: walletInfo,
             bundler: bundlerStats,
             flowAccount: accountState,
+            keyMismatch,
             config: {
                 flowEndpoint: this.config.bundler.flowEndpoint,
                 evmEndpoint: this.config.bundler.evmEndpoint,
-                smartAccountAddress: this.config.smartAccountAddress
+                flowKeyRegister: this.config.flowKeyRegister,
+                rootRegistry: this.config.rootRegistry,
+                factory: this.config.factory
             }
         };
     }
@@ -231,70 +329,105 @@ export class FlowControlledService {
     /**
      * Get available Flow keys
      */
-    getAvailableKeys() {
-        return this.wallet.getAvailableKeys();
+    async getAvailableKeys() {
+        return await this.wallet.getAvailableKeys();
     }
 
     /**
-     * Get keys by signature algorithm
+     * Select keys based on strategy
      */
-    getKeysByAlgorithm(algorithm: SignatureAlgorithm) {
-        return this.wallet.getKeysByAlgorithm(algorithm);
-    }
-
-    /**
-     * Refresh Flow keys
-     */
-    async refreshKeys(): Promise<void> {
-        await this.wallet.refreshKeys();
+    async selectKeys(
+        strategy: KeySelectionStrategy,
+        options?: any
+    ) {
+        return await this.wallet.selectKeys(strategy, options);
     }
 
     /**
      * Check if root is fresh for current Flow account
      */
-    async checkRootFreshness(): Promise<boolean> {
-        const address = this.wallet.getCurrentAddress();
-        if (!address) {
+    async checkRootFreshness(flowAddress?: string): Promise<boolean> {
+        const targetAddress = flowAddress || this.wallet.getCurrentAddress();
+        
+        if (!targetAddress) {
             return false;
         }
-        return await this.bundler.checkRootFreshness(address);
+        
+        return await this.bundler.checkRootFreshness(targetAddress);
     }
 
     /**
-     * Force update Merkle root for current Flow account
+     * Force update Merkle root for Flow account
      */
-    async forceRootUpdate(): Promise<string> {
-        const address = this.wallet.getCurrentAddress();
-        if (!address) {
-            throw new FlowControlledAccountError(
-                FlowControlledError.INVALID_FLOW_ADDRESS,
-                "No authenticated Flow address"
+    async forceRootUpdate(flowAddress?: string): Promise<string> {
+        const targetAddress = flowAddress || this.wallet.getCurrentAddress();
+        
+        if (!targetAddress) {
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_FLOW_ADDRESS,
+                "No Flow address provided or authenticated"
             );
         }
 
-        const merkleTree = await this.bundler.buildMerkleTree(address);
-        const update = {
-            flowAddress: address,
-            merkleRoot: merkleTree.root,
-            blockHeight: merkleTree.blockHeight,
-            keyCount: merkleTree.totalKeys,
-            timestamp: Date.now()
-        };
+        const merkleTree = await this.bundler.buildKeyInfoMerkleTree(targetAddress);
+        return await this.bundler.updateRoot(targetAddress, merkleTree);
+    }
 
-        return await this.bundler.updateRoot(update);
+    /**
+     * Get predicted smart account address
+     */
+    async predictAccountAddress(flowAddress?: string): Promise<string> {
+        const targetAddress = flowAddress || this.wallet.getCurrentAddress();
+        
+        if (!targetAddress) {
+            throw new FlowControlledAccountErrorV2(
+                FlowControlledErrorV2.INVALID_FLOW_ADDRESS,
+                "No Flow address provided or authenticated"
+            );
+        }
+
+        return await this.bundler.predictAccountAddress(targetAddress);
     }
 
     /**
      * Get bundler reference (for advanced usage)
      */
-    getBundler(): FlowControlledBundler {
+    getBundler(): FlowControlledBundlerV2 {
         return this.bundler;
     }
 
     /**
      * Get wallet reference (for advanced usage)
      */
-    getWallet(): FlowControlledWallet {
+    getWallet(): FlowControlledWalletV2 {
         return this.wallet;
+    }
+
+    /**
+     * Add Flow account to monitoring
+     */
+    async addFlowAccountMonitoring(flowAddress: string): Promise<void> {
+        await this.bundler.addFlowAccount(flowAddress);
+    }
+
+    /**
+     * Remove Flow account from monitoring
+     */
+    async removeFlowAccountMonitoring(flowAddress: string): Promise<void> {
+        await this.bundler.removeFlowAccount(flowAddress);
+    }
+
+    /**
+     * Get Flow account monitoring state
+     */
+    async getFlowAccountState(flowAddress: string): Promise<FlowAccountMonitorV2> {
+        return await this.bundler.getFlowAccountState(flowAddress);
+    }
+
+    /**
+     * Get bundler statistics
+     */
+    async getBundlerStats(): Promise<BundlerStatsV2> {
+        return await this.bundler.getBundlerStats();
     }
 }
