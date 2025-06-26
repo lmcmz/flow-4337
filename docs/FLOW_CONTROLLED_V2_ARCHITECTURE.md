@@ -39,7 +39,7 @@ Flow-Controlled ERC-4337 V2 represents a complete architectural evolution from t
 ```
 
 ## 🖼️ Diagram
-[diagram](./diagram.png)
+![diagram](./diagram.png)
 
 ## 📦 Core Components
 
