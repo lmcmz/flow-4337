@@ -10,7 +10,8 @@
       "WebFetch(domain:github.com)",
       "Bash(git pull:*)",
       "Bash(git stash:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(rm:*)"
     ],
     "deny": []
   }
